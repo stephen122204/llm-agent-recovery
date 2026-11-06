@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "alems/raf/laya_p_io/1.1.0",
+  "title": "laya-serve wire for laya_p (R7 contract, Oct 17): POST /v1/systemone, one text per call",
+  "$defs": {
+    "request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "model", "questions"],
+      "properties": {
+        "state": {"type": "string", "description": "laya_text v3 output for one option"},
+        "model": {"const": "ear_recovery_success_v3", "description": "laya_text.LAYA_MODEL"},
+        "questions": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ear_recovery_success"],
+          "properties": {
+            "ear_recovery_success": {
+              "type": "object", "additionalProperties": false,
+              "required": ["type", "instructions"],
+              "properties": {
+                "type": {"const": "noul"},
+                "instructions": {"const": "Will this recovery attempt complete the user's task correctly, given the failure and the chosen option?"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "response": {
+      "type": "object", "additionalProperties": true,
+      "required": ["model", "answers"],
+      "properties": {
+        "model": {"const": "ear_recovery_success_v3"},
+        "answers": {
+          "type": "object",
+          "required": ["ear_recovery_success"],
+          "properties": {
+            "ear_recovery_success": {
+              "type": "object", "required": ["noul"],
+              "properties": {"noul": {"type": "number", "minimum": 0, "maximum": 1}}
+            }
+          }
+        }
+      }
+    }
+  },
+  "description": "Fail closed to beta_p: HTTP 400, 404, 422 or another model name -> template mismatch; missing or out of range noul -> bad answer; timeout over 2 s or refused connection -> unreachable. Reason recorded per decision."
+}

@@ -1,0 +1,2126 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+EXPERIMENT HARNESS – Wraps AI execution with energy measurement
+================================================================================
+
+Purpose:
+    This is the CRITICAL synchronization layer between energy measurement
+    (Module 1) and AI execution (Module 3). It ensures perfect alignment
+    between RAPL counters and code execution.
+
+SCIENTIFIC NOTES:
+    - Uses Module 1's 3‑layer architecture correctly:
+        Layer 1: RawEnergyMeasurement (from EnergyEngine)
+        Layer 2: BaselineMeasurement (idle power)
+        Layer 3: DerivedEnergyMeasurement (computed metrics for analysis)
+    - ALL THREE LAYERS are returned in results for complete transparency
+    - Energy measurement wraps ENTIRE execution (not just API calls)
+    - Warmup runs discard first execution to eliminate cache/initialization effects
+    - Multiple repetitions (n>=30) for statistical power
+    - Cool‑down period between linear and agentic ensures fair comparison
+    - Network latency tracked separately for cloud models
+    - CPU metrics come from Layer 3's performance counters
+
+Why this exists:
+    - Timestamps inside executors can drift from hardware counters
+    - Even 50ms misalignment corrupts orchestration tax measurements
+    - This harness guarantees perfect synchronization
+
+Requirements:
+    Req 3.6: Device Handoff Latency – precise timing alignment
+    Req 1.46: High‑frequency sampling – must capture short agent steps
+    Req 3.5: Cool‑down period between runs
+
+Author: Deepak Panigrahy
+================================================================================
+"""
+
+import json
+import logging
+import os
+import socket
+import subprocess
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import psutil
+from scipy import stats as scipy_stats
+
+from core.analysis.energy_analyzer import EnergyAnalyzer
+from core.readers.factory import ReaderFactory
+from core.config_loader import ConfigLoader
+from core.database.manager import DatabaseManager
+from core.energy_engine import EnergyEngine
+from core.execution.base import calc_stats
+from core.execution.display_formatter import (display_hardware,
+                                              display_ipc_analysis,
+                                              display_sustainability_header,
+                                              display_workflow_comparison)
+from core.execution.hardware_collector import (_is_cold_start,
+                                               _measure_network_latency,
+                                               _read_interrupts,
+                                               _read_temperature, _warmup_run,
+                                               get_background_cpu,
+                                               get_governor,
+                                               get_interrupt_rate,
+                                               get_process_count,
+                                               get_process_memory,
+                                               get_turbo_status)
+from core.execution.sample_processor import (calculate_thermal_metrics,
+                                             load_canonical_metrics,
+                                             process_cpu_samples,
+                                             process_energy_samples)
+from core.sustainability.calculator import SustainabilityCalculator
+from core.utils.baseline_manager import BaselineManager
+from core.utils.proc_reader import (
+read_total_cpu_ticks,
+read_process_cpu_ticks,
+compute_cpu_fraction,
+)
+
+logger = logging.getLogger(__name__)
+# Run progress shown on the console in normal mode (plan 39.5.2e rule 2.9).
+progress = logging.getLogger("alems.progress")
+# User result output (summaries, reports) goes to stdout via the renderer.
+from core.observability.console import get_console as _get_console
+console = _get_console()
+
+def _perf_field(perf, field, default=0):
+    """
+    raw_energy.perf is a dict {} on platforms without perf (Darwin,
+    has_perf=False), but a real PerformanceCounters object with
+    attributes on Linux (has_perf=True). Handles both shapes, fixes
+    a regression introduced 2026-07-06 that assumed dict-only and
+    broke the working Linux path.
+    """
+    if isinstance(perf, dict):
+        return perf.get(field, default)
+    return getattr(perf, field, default)
+
+def get_workflow_order(rep_num):
+    """Return (first, second) workflow order for repetition (1-based)."""
+    if rep_num % 2 == 1:  # Odd: 1,3,5...
+        return ("linear", "agentic")
+    else:  # Even: 2,4,6...
+        return ("agentic", "linear")
+
+
+class ExperimentHarness:
+    """
+    Wraps AI execution with energy measurement for perfect synchronization.
+
+    Critical design:
+        energy_start()  ← RAPL starts recording
+        executor.execute()  ← AI code runs
+        energy_stop()   ← RAPL stops recording
+
+    This ensures hardware counters align exactly with software execution.
+
+    For cloud models, network latency is tracked separately to distinguish
+    orchestration overhead from network delays.
+    """
+
+    def __init__(self, config_loader):
+        """
+        Initialize harness with energy measurement and analysis modules.
+
+        Args:
+            config_loader: Module 0 config loader
+        """
+        hw_config = config_loader.get_hardware_config()
+        settings = config_loader.get_settings()
+
+        # Convert settings to dict if needed
+        if hasattr(settings, "__dict__"):
+            settings_dict = settings.__dict__
+        else:
+            settings_dict = settings
+
+        # Merge into single config dict for EnergyEngine
+        engine_config = hw_config.copy()
+        engine_config["settings"] = settings_dict
+
+        self.energy_engine = EnergyEngine(engine_config)
+        # ── Thermal V2: discovery and registry (reboot-resilient) ────────────
+        # Called every harness init so zone paths are re-discovered after reboot.
+        # EEI compliant: harness owns DB access, engine does not.
+        try:
+            from core.thermal.thermal_discovery import (
+                discover_thermal_zones, discover_cooling_devices,
+                register_thermal_zones, register_cooling_devices,
+                get_machine_id,
+            )
+            from core.readers.factory import ReaderFactory as _RF
+            from core.thermal.thermal_writer_v2 import ThermalWriterV2
+            from core.thermal.cooling_writer import CoolingWriter
+ 
+            _machine_id = get_machine_id()
+            _raw_zones   = discover_thermal_zones(_machine_id)
+            _raw_devices = discover_cooling_devices(_machine_id)
+ 
+            # register_thermal_zones needs raw sqlite3 conn.
+            # __init__ has no DatabaseManager — open short-lived connection
+            # using same 3-layer path resolution as energy_engine.py lines 628-648.
+            from core.storage.inprocess_writer import InProcessWriter as _IPW
+            from core.storage.resolver import resolve_store as _rs
+            _therm_writer = _IPW(_rs())
+            _therm_writer.open()
+            try:
+                self.registered_zones   = register_thermal_zones(_therm_writer.conn, _raw_zones)
+                self.registered_cooling = register_cooling_devices(_therm_writer.conn, _raw_devices)
+            finally:
+                _therm_writer.close()
+ 
+            # Replace the engine's legacy thermal reader with ThermalReaderV2
+            # so read_all_thermal() returns quality-flagged per-zone data
+            if self.registered_zones:
+                self.energy_engine.sensor = _RF._make_thermal_reader_v2(
+                    self.registered_zones
+                )
+                self.energy_engine.thermal_reader = self.energy_engine.sensor
+                self.energy_engine.sensor.initialize()
+ 
+            # Cooling reader (no engine integration needed — harness owns it)
+            self.cooling_reader = _RF._make_cooling_reader(self.registered_cooling) \
+                if self.registered_cooling else None
+ 
+            # Writers set to None here — wired per-run in experiment_runner
+            # when DatabaseManager is available.
+            self.thermal_writer_v2 = None
+            self.cooling_writer    = None
+ 
+            logger.info(
+                "Thermal V2 init: %d zones, %d cooling devices on %s",
+                len(self.registered_zones), len(self.registered_cooling), _machine_id
+            )
+ 
+        except Exception as _exc:
+            logger.warning("Thermal V2 init failed (non-fatal): %s", _exc)
+            self.registered_zones   = {}
+            self.registered_cooling = {}
+            self.cooling_reader     = None
+            self.thermal_writer_v2  = None
+            self.cooling_writer     = None
+
+        self.energy_analyzer = EnergyAnalyzer()
+        self.sustainability = SustainabilityCalculator(
+            config_loader
+        )  # ← This stays as ConfigLoader
+
+        # Load baseline if available (Layer 2)
+        self.baseline_mgr = BaselineManager()
+        self.baseline = self.baseline_mgr.get_latest()
+        if self.baseline:
+            logger.info(f"Loaded baseline: {self.baseline.baseline_id}")
+        else:
+            logger.warning("No baseline found. Will measure during experiment.")
+
+        if not self.baseline:
+            logger.warning("No baseline found. Run baseline measurement first.")
+            logger.info("no baseline: energy values will not be corrected for idle power")
+
+        logger.info("ExperimentHarness initialized")
+
+    def save_to_database(
+        self,
+        results: Dict[str, Any],
+        experiment_meta: Dict[str, Any],
+        hardware_info: Optional[Dict] = None,
+    ) -> Optional[int]:
+        """
+        Save experiment results to database.
+
+        Args:
+            results: Results from run_comparison
+            experiment_meta: Experiment metadata
+            hardware_info: Hardware configuration (optional)
+
+        Returns:
+            exp_id if successful, None otherwise
+        """
+        try:
+            # Load database config
+            config_loader = ConfigLoader()
+            db_config = config_loader.get_db_config()
+
+            # Create database manager
+            db = DatabaseManager(db_config)
+            # Ensure tables exist
+            db.create_tables()
+            # Verify BASELINE_DOMAIN_MAP integrity at startup — fail-fast (BDC-8)
+            from core.utils.idle_baseline import (
+                _verify_domain_map_integrity, DomainMapIntegrityError)
+            try:
+                _verify_domain_map_integrity(db.db.conn)
+            except DomainMapIntegrityError as e:
+                logger.error("Domain map integrity check FAILED: %s", e)
+                raise
+
+            # Get hardware ID if info provided
+            hw_id = None
+            if hardware_info:
+                hw_id = db.insert_hardware(hardware_info)
+
+            # Insert experiment
+            exp_id = db.insert_experiment(experiment_meta)
+
+            # Insert all runs (linear and agentic)
+            all_runs = []
+            if "all_runs" in results:
+                # New format with all_runs dict
+                all_runs.extend(results["all_runs"].get("linear", []))
+                all_runs.extend(results["all_runs"].get("agentic", []))
+            else:
+                # Old format - single run
+                all_runs.append(results)
+
+            with db.transaction():
+                for run in all_runs:
+                    db.insert_run(exp_id, hw_id, run)
+
+            # Create tax summaries
+            db.create_tax_summaries(exp_id)
+
+            db.close()
+            logger.info(f"✅ Saved experiment {exp_id} to database")
+            return exp_id
+
+        except Exception as e:
+            logger.error(f"❌ Failed to save to database: {e}")
+            return None
+
+    # Note: System-wide swap metrics are already in scheduler_monitor.py
+    # This is handled by M3-6 (partial) - we only need RSS/VMS here
+    def run_linear(
+        self,
+        executor,
+        prompt: str,
+        task_id: str = None,
+        is_cloud: bool = True,
+        country_code: str = "US",
+        run_number: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Run linear executor with synchronized energy measurement.
+
+        This uses the 3‑layer architecture correctly and returns ALL THREE LAYERS:
+            1. RawEnergyMeasurement from EnergyEngine (Layer 1)
+            2. Baseline from BaselineManager (Layer 2)
+            3. DerivedEnergyMeasurement from EnergyAnalyzer (Layer 3) ← USED FOR METRICS
+        """
+        progress.info("measure start  linear")
+        from core.observability import status as _obs_status
+        _obs_status.set_context(phase="linear")
+        # 39.5.2b gate entry: before the complete SPEC_39_4 3a sequence, nothing
+        # inserted between its steps (amended SPEC_39_5_2 section 4).
+        from core.observability import gate as _obs_gate
+        # 39.5.2c run identity: created before the gate, never inside 3a.
+        import uuid as _uuid
+        _run_uid = str(_uuid.uuid4())
+        _obs_gate.enter()
+        self.energy_engine.scheduler.reset_interrupt_samples()
+        # Measure network latency for cloud models
+        network_metrics = {}
+        if is_cloud:
+            network_metrics = _measure_network_latency()
+            # Inside the gate: the record is buffered and formatted after t1 (5.2a).
+            logger.info("network dns %.1f ms", network_metrics.get("dns_latency_ms", 0))
+        # ====================================================================
+        # Capture system state BEFORE run (M3-1 through M3-6)
+        # ====================================================================
+        # Capture RAPL and CPU ticks BEFORE pre-task instrumentation reads.
+        # Opens the diagnostic pre-task energy window (t_before_pretask → t0).
+        # read_energy() returns None on non-RAPL platforms — PAC compliant.
+        _rapl_before_pretask = self.energy_engine.rapl.read_energy()
+        _gpu_before_pretask  = ReaderFactory.get_gpu_energy_uj(self.energy_engine.rapl)
+        _pid_pre             = os.getpid()
+        _total_ticks_pre     = read_total_cpu_ticks()
+        _pid_ticks_pre       = read_process_cpu_ticks(_pid_pre)
+        _pre_task_start_perf = time.perf_counter()
+
+        intr_before = _read_interrupts()
+        temp_start = _read_temperature()
+        governor = get_governor()
+        turbo = get_turbo_status()
+        background_cpu = get_background_cpu()
+        process_count = get_process_count()
+        memory_before = get_process_memory()
+        is_cold = _is_cold_start(run_number)
+
+        # ====================================================================
+        # Step 1: Get Raw Energy Measurement (Layer 1)
+        # ====================================================================
+        run_start_dt = datetime.now()  # Human-readable start time
+        run_start_perf = time.perf_counter()  # High-precision for duration
+        self.energy_engine.start_measurement()
+        # F3: t0 anchor — read immediately after start_measurement() before any task work.
+        # Enables exact pre_task delta: rapl_at_t0 - rapl_before = pre_task_raw.
+        _rapl_at_t0 = self.energy_engine.rapl.read_energy()
+        _pid               = os.getpid()
+        _total_ticks_start = read_total_cpu_ticks()
+        _pid_ticks_start   = read_process_cpu_ticks(_pid)
+        self.energy_engine.set_workload_pid(_pid)  # Chunk 5: pass PID to interrupt sampler        
+        exec_result = executor.execute(prompt)
+        # t1: task boundary — executor has returned, task is complete.
+        task_end_perf        = time.perf_counter()
+        _total_ticks_t1      = read_total_cpu_ticks()
+        _pid_ticks_t1        = read_process_cpu_ticks(os.getpid())
+        raw_energy = (
+            self.energy_engine.stop_measurement()
+        )  # RawEnergyMeasurement (Layer 1)
+        # rapl_after_task captured AFTER stop_measurement() so MAX(pkg_end_uj)
+        # from energy_samples cannot overshoot this anchor.
+        _rapl_after_task     = self.energy_engine.rapl.read_energy()
+        _gpu_after_task      = ReaderFactory.get_gpu_energy_uj(self.energy_engine.rapl)
+        run_end_dt           = datetime.now()   # t2: human-readable (post-framework)
+        run_end_perf         = time.perf_counter()
+        _total_ticks_t2      = read_total_cpu_ticks()
+        _pid_ticks_t2        = read_process_cpu_ticks(os.getpid())
+        # task_duration = executor time only — canonical energy denominator
+        task_duration_sec    = task_end_perf - run_start_perf
+        # post_task_duration = stop_measurement + post-processing cost (t1→t2)
+        post_task_duration_sec = run_end_perf - task_end_perf
+        # pre_task_duration = instrumentation reads before measurement (t_before→t0)
+        pre_task_duration_sec  = run_start_perf - _pre_task_start_perf
+        # framework_overhead = pre + post (total instrumentation wall time)
+        framework_overhead_sec = pre_task_duration_sec + post_task_duration_sec
+
+
+        # legacy field kept for backward compat
+        run_duration_sec = task_duration_sec
+        # 39.5.2b gate exit: after the duration computations; held records flush here.
+        _obs_window = _obs_gate.exit()
+
+        logger.info(
+            "linear compute %s ms, measured duration %.1f ms",
+            exec_result.get("execution_time_ms", 0), run_duration_sec * 1000,
+        )
+
+        # ====================================================================
+        # DEBUG: Check what's available in energy_engine
+        # ====================================================================
+        logger.debug("energy_engine attributes: %s", dir(self.energy_engine))
+        if hasattr(self.energy_engine, "samples"):
+            logger.debug("samples keys: %s", self.energy_engine.last_samples.keys())
+        else:
+            logger.debug("energy_engine has no 'samples' attribute")
+
+        # ====================================================================
+        # Load canonical metrics from override file
+        # ====================================================================
+        from pathlib import Path
+
+        import yaml
+
+        canonical_metrics = {}
+        store_extra = True
+
+        override_path = Path("config/turbostat_override.yaml")
+        if override_path.exists():
+            try:
+                with open(override_path, "r") as f:
+                    override_config = yaml.safe_load(f)
+                canonical_metrics = override_config.get("canonical_metrics", {})
+                store_extra = override_config.get("store_extra_in_json", True)
+                logger.info("loaded %d canonical metrics from override file", len(canonical_metrics))
+            except Exception as e:
+                logger.warning("failed to load override file: %s", e)
+
+        # ====================================================================
+        # Load canonical metrics from override file
+        # ====================================================================
+        from pathlib import Path
+
+        import yaml
+
+        canonical_metrics = {}
+        store_extra = True
+
+        override_path = Path("config/turbostat_override.yaml")
+        if override_path.exists():
+            try:
+                with open(override_path, "r") as f:
+                    override_config = yaml.safe_load(f)
+                canonical_metrics = override_config.get("canonical_metrics", {})
+                store_extra = override_config.get("store_extra_in_json", True)
+                logger.info("loaded %d canonical metrics from override file", len(canonical_metrics))
+            except Exception as e:
+                logger.warning("failed to load override file: %s", e)
+
+        # ====================================================================
+        # Get samples from energy engine
+        # ====================================================================
+        energy_samples, interrupt_samples, io_samples = process_energy_samples(self.energy_engine)
+        cpu_samples = process_cpu_samples(raw_energy, canonical_metrics, store_extra)
+        # Process thermal samples
+        thermal_samples = []
+        temps = []
+        throttle_events = 0
+        start_time_ns = int(run_start_dt.timestamp() * 1e9)
+
+        _raw_thermal = (
+            raw_energy.get("thermal_samples")
+            if isinstance(raw_energy, dict)
+            else getattr(raw_energy, "thermal_samples", None)
+        )
+        if _raw_thermal:
+            for thermal_tuple in _raw_thermal:
+                # Chunk 2 final: unpack 6-tuple
+                # (now, readings, throttled, sample_start_ns, sample_end_ns, interval_ns)
+                ts               = thermal_tuple[0]
+                readings         = thermal_tuple[1]
+                throttled        = thermal_tuple[2]
+                sample_start_ns  = thermal_tuple[3] if len(thermal_tuple) > 3 else None
+                sample_end_ns    = thermal_tuple[4] if len(thermal_tuple) > 4 else None
+                interval_ns      = thermal_tuple[5] if len(thermal_tuple) > 5 else None
+ 
+                time_since_start = (ts * 1e9 - start_time_ns) / 1e9
+ 
+                thermal_samples.append({
+                    "timestamp_ns":    int(ts * 1e9),   # backward compat = end time
+                    "sample_start_ns": sample_start_ns,
+                    "sample_end_ns":   sample_end_ns,
+                    "interval_ns":     interval_ns,
+                    "sample_time_s":   time_since_start,
+                    "cpu_temp":        readings.get("cpu_temp"),
+                    "system_temp":     readings.get("system_temp"),
+                    "wifi_temp":       readings.get("wifi_temp"),
+                    "throttle_event":  1 if throttled else 0,
+                    "all_zones":       readings,         # serialised to JSON in insert
+                }
+                )
+                if readings.get("cpu_temp"):
+                    temps.append(readings["cpu_temp"])
+                if throttled:
+                    throttle_events += 1
+
+        # Calculate thermal metrics
+        thermal_area = 0
+        if len(temps) > 1:
+            # Approximate thermal area (integral approximation)
+            thermal_area = sum(temps) / len(temps) * (max(temps) - min(temps))
+
+        # ====================================================================
+        # Calculate thermal metrics from thermal_samples (primary source)
+        # ====================================================================
+        start_temp_c, max_temp_c, min_temp_c, thermal_delta_c = (
+            calculate_thermal_metrics(cpu_samples, thermal_samples)
+        )
+
+        # ====================================================================
+        # Step 2: Compute Derived Energy (Layer 3) using Baseline (Layer 2)
+        # ====================================================================
+        derived = self.energy_analyzer.compute(
+            raw_energy, self.baseline
+        )  # DerivedEnergyMeasurement (Layer 3)
+
+        # ====================================================================
+        # Step 3: Calculate sustainability (optional)
+        # ====================================================================
+        sustainability = self.sustainability.calculate_from_derived(
+            derived, country_code=country_code, query_count=1
+        )
+
+        # ====================================================================
+        # Step 4: Energy per token (using Layer 3)
+        # ====================================================================
+        if (exec_result.get("tokens", {}).get("total") or 0) > 0:
+            energy_per_token = (
+                derived.workload_energy_j / exec_result["tokens"]["total"]
+            )
+        else:
+            energy_per_token = 0
+
+        # ====================================================================
+        # Step 5: CPU metrics from Layer 3's performance_counters
+        # ====================================================================
+        if hasattr(derived, "performance_counters") and derived.performance_counters:
+            cpu_metrics = {
+                "instructions": derived.performance_counters.instructions,
+                "cycles": derived.performance_counters.cpu_cycles,
+                "ipc": derived.performance_counters.instructions_per_cycle(),
+                "cache_misses": derived.performance_counters.cache_misses,
+                "context_switches": derived.performance_counters.total_context_switches(),
+            }
+        else:
+            # Fallback if performance_counters not available
+            cpu_metrics = {
+                "instructions": 0,
+                "cycles": 0,
+                "ipc": 0,
+                "cache_misses": 0,
+                "context_switches": 0,
+                "note": "Performance counters not available",
+            }
+        if hasattr(raw_energy, "scheduler_metrics") and raw_energy.scheduler_metrics:
+            swap_metrics = raw_energy.scheduler_metrics.get("swap", {})
+        else:
+            swap_metrics = {}
+
+        # Get scheduler metrics with start/end swap values
+        scheduler_start = {}
+        scheduler_end = {}
+        if hasattr(raw_energy, "scheduler_start") and raw_energy.scheduler_start:
+            scheduler_start = raw_energy.scheduler_start.get("swap", {})
+        if hasattr(raw_energy, "scheduler_end") and raw_energy.scheduler_end:
+            scheduler_end = raw_energy.scheduler_end.get("swap", {})
+
+        # ====================================================================
+        # Step 6: Return ALL THREE LAYERS with ML features
+        # ====================================================================
+
+        # ====================================================================
+        # Capture system state AFTER run
+        # ====================================================================
+        intr_after = _read_interrupts()
+        temp_max = max(temp_start, _read_temperature())
+        memory_after = get_process_memory()
+        duration = raw_energy.duration_seconds
+        interrupt_rate = get_interrupt_rate(intr_before, intr_after, duration)
+
+        logger.info(
+            "network bytes sent %s, received %s, tcp retransmits %s",
+            exec_result.get("total_bytes_sent", "not found"),
+            exec_result.get("total_bytes_recv", "not found"),
+            exec_result.get("total_tcp_retransmits", "not found"),
+        )
+
+        result = {
+            "experiment_id": exec_result.get("experiment_id"),
+            "task_id": task_id,
+            "workflow": "linear",
+            "country_code": country_code,
+            "execution": exec_result,
+             "pending_interactions": exec_result.get("pending_interactions", []),
+            # THREE LAYERS – All available for analysis
+            "layer1_raw": raw_energy.to_dict(),  # Raw hardware readings
+            "layer2_baseline": (
+                self.baseline.to_dict() if self.baseline else None
+            ),  # Idle reference
+            "layer3_derived": derived.to_dict(),  # Corrected metrics
+            # Backward compatibility (keep old keys)
+            "raw_energy": raw_energy.to_dict(),
+            "derived_energy": derived.to_dict(),
+            # Other metrics
+            "sustainability": sustainability.to_dict() if sustainability else None,
+            "network_metrics": network_metrics,
+            "energy_per_token": energy_per_token,
+            "cpu_metrics": cpu_metrics,
+            # ====================================================================
+            # NEW: ML Features Dictionary (ALL features for training)
+            # ====================================================================
+            "ml_features": {
+                # Hardware metrics (from layer3_derived)
+                "start_time_ns": int(run_start_dt.timestamp() * 1_000_000_000),
+                "end_time_ns": int(run_end_dt.timestamp() * 1_000_000_000),
+                "start_time_iso": run_start_dt.isoformat(),
+                "end_time_iso": run_end_dt.isoformat(),
+                "duration_sec": task_duration_sec,           # task only (corrected)
+                "duration_ms": task_duration_sec * 1000,
+                "task_duration_sec": task_duration_sec,
+                "task_duration_ns": int(task_duration_sec * 1_000_000_000),
+                "post_task_duration_ns": int(post_task_duration_sec * 1_000_000_000),
+                # Bug 8 fix: direct RAPL delta for post_task window [t1, t2].
+                # None on non-RAPL platforms — PAC compliant.
+                "framework_overhead_ns": int(framework_overhead_sec * 1_000_000_000),
+                "framework_overhead_sec": framework_overhead_sec,
+                "total_run_duration_sec": run_end_perf - _pre_task_start_perf,
+                "pre_task_duration_sec":  pre_task_duration_sec,
+                # 39.5.2b window provenance (None when the gate never engaged)
+                "measurement_log_level":       _obs_window["measurement_log_level"],
+                "measurement_log_config_hash": _obs_window["measurement_log_config_hash"],
+                "observability_overflow":      _obs_window["observability_overflow"],
+                "measurement_heartbeat_s":     _obs_window.get("measurement_heartbeat_s"),
+                "post_task_duration_sec": post_task_duration_sec,
+                "rapl_before_pretask":    _rapl_before_pretask,   # Dict or None
+                "rapl_at_t0":             _rapl_at_t0,             # Dict or None — t0 anchor
+                "rapl_after_task":        _rapl_after_task,        # Dict or None
+                "gpu_before_pretask":     _gpu_before_pretask,    # µJ or None
+                "gpu_after_task":         _gpu_after_task,         # µJ or None
+                "cpu_frac_pre":           compute_cpu_fraction(
+                    _pid_ticks_start - _pid_ticks_pre,
+                    _total_ticks_start - _total_ticks_pre,
+                ),
+                "cpu_frac_post":          compute_cpu_fraction(
+                    _pid_ticks_t2 - _pid_ticks_t1,
+                    _total_ticks_t2 - _total_ticks_t1,
+                ),
+                "duration_includes_overhead": 0,              # corrected run
+                "instructions": derived.instructions,
+                "pkg_energy_uj": derived.package_energy_uj,
+                "core_energy_uj": derived.core_energy_uj,
+                "uncore_energy_uj": derived.uncore_energy_uj,
+                "dram_energy_uj": (
+                    derived.dram_energy_uj if hasattr(derived, "dram_energy_uj") else 0
+                ),
+                "idle_energy_uj": derived.idle_energy_uj,
+                "dynamic_energy_uj":     derived.workload_energy_uj,
+                "pid":                   _pid,
+                "cpu_fraction":          compute_cpu_fraction(read_process_cpu_ticks(_pid) - _pid_ticks_start, read_total_cpu_ticks() - _total_ticks_start),
+                "attributed_energy_uj":  int((read_process_cpu_ticks(_pid) - _pid_ticks_start) / max(read_total_cpu_ticks() - _total_ticks_start, 1) * max(derived.workload_energy_uj, 0)),              
+                "baseline_energy_uj":    derived.idle_energy_uj,
+                "avg_power_watts":       derived.workload_energy_uj / max(1, derived.duration_seconds) / 1_000_000,
+                "orchestration_tax_uj": derived.orchestration_tax_uj,
+                # GPU PP1 energy — None on non-Tiger-Lake platforms
+                "gpu_total_energy_uj":    derived.gpu_total_energy_uj,
+                "gpu_baseline_energy_uj": derived.gpu_baseline_energy_uj,
+                "gpu_dynamic_energy_uj":  derived.gpu_dynamic_energy_uj,
+                "gpu_pct_of_pkg":         derived.gpu_pct_of_pkg,
+                "gpu_dynamic_method":     derived.gpu_dynamic_method,
+                "gpu_idle_power_w_used":  derived.gpu_idle_power_w_used,
+                # SPEC_SPBM_FULL_TELEMETRY: in-memory attributes carried
+                # through for _run_post_etl's process_spbm_telemetry step.
+                "power_limits_snapshot":   getattr(self.energy_engine, "power_limits_snapshot", None),
+                "spbm_telemetry_coverage": getattr(self.energy_engine, "spbm_telemetry_coverage", None),               
+                "cycles": derived.cycles,
+                "ipc": derived.ipc,
+                "cache_misses": derived.cache_misses,
+                "cache_references": derived.cache_references,
+                "cache_miss_rate": (
+                    derived.cache_misses / derived.cache_references
+                    if derived.cache_references > 0
+                    else 0
+                ),
+                "page_faults": (
+                    _perf_field(raw_energy.perf, "minor_page_faults") +
+                    _perf_field(raw_energy.perf, "major_page_faults")
+                ),
+                "major_page_faults": (
+                    _perf_field(raw_energy.perf, "major_page_faults")
+                ),
+                "minor_page_faults": (
+                    _perf_field(raw_energy.perf, "minor_page_faults")
+                ),
+                "context_switches_voluntary": derived.context_switches_voluntary,
+                "context_switches_involuntary": derived.context_switches_involuntary,
+                "total_context_switches": derived.total_context_switches,
+                "thread_migrations": derived.thread_migrations,
+                "run_queue_length": derived.run_queue_length,
+                "kernel_time_ms": derived.kernel_time_ms,
+                "user_time_ms": derived.user_time_ms,
+                "frequency_mhz": derived.frequency_mhz if derived.frequency_mhz else 0,
+                "cpu_active_ratio": derived.cpu_active_ratio,
+                "package_temp_celsius": derived.package_temp_celsius,
+                "baseline_temp_celsius": (
+                    self.baseline.cpu_temperature_c if self.baseline else None
+                ),
+                "thermal_metrics": {
+                    "min_temp_c": min(temps) if temps else 0,
+                    "max_temp_c": max(temps) if temps else 0,
+                    "avg_temp_c": sum(temps) / len(temps) if temps else 0,
+                    "thermal_area": thermal_area,
+                    "throttle_events": throttle_events,
+                    "throttle_ratio": (
+                        throttle_events / len(thermal_samples) if thermal_samples else 0
+                    ),
+                },
+                # C-state metrics
+                "c2_time_seconds": derived.c2_time_seconds,
+                "c3_time_seconds": derived.c3_time_seconds,
+                "c6_time_seconds": derived.c6_time_seconds,
+                "c7_time_seconds": derived.c7_time_seconds,
+                # Swap metrics
+                "swap_total_mb": swap_metrics.get("swap_total_mb"),
+                "swap_end_free_mb": swap_metrics.get("swap_free_mb"),
+                "swap_start_used_mb": scheduler_start.get("swap_used_mb"),
+                "swap_end_used_mb": scheduler_end.get("swap_used_mb"),
+                "swap_start_cached_mb": scheduler_start.get("swap_cached_mb"),
+                "swap_end_cached_mb": scheduler_end.get("swap_cached_mb"),
+                "swap_end_percent": swap_metrics.get("swap_percent"),
+                # Ring bus
+                "ring_bus_freq_mhz": derived.ring_bus_current_mhz,
+                "wakeup_latency_us": derived.wakeup_latency_us,
+                # Thermal validity
+                "thermal_during_experiment": derived.thermal_during_experiment,
+                "thermal_now_active": derived.thermal_now_active,
+                "thermal_since_boot": derived.thermal_since_boot,
+                "experiment_valid": (
+                    derived.thermal_during_experiment == 0
+                    and derived.thermal_now_active == 0
+                ),
+                # Token metrics (from execution)
+                "total_tokens": exec_result.get("tokens", {}).get("total"),
+                "prompt_tokens": exec_result.get("tokens", {}).get("prompt"),
+                "completion_tokens": exec_result.get("tokens", {}).get("completion"),
+                # Network metrics (for cloud models)
+                "bytes_sent": exec_result.get("total_bytes_sent", 0),
+                "bytes_recv": exec_result.get("total_bytes_recv", 0),
+                "tcp_retransmits": exec_result.get("total_tcp_retransmits"),
+                "total_non_local_ms": exec_result.get("total_workflow_non_local_ms", 0),
+                "effective_throughput_kbps": exec_result.get("effective_throughput_kbps", 0),
+
+                "dns_latency_ms": network_metrics.get("dns_latency_ms", 0),
+                "api_latency_ms": exec_result.get("api_latency_ms", 0),
+                "compute_time_ms": exec_result.get(
+                    "compute_time_ms", exec_result.get("execution_time_ms", 0)
+                ),
+                # =============================================================
+                # NEW: System State Metrics (ADD THESE)
+                # =============================================================
+                "governor": governor,
+                "baseline_id": self.baseline.baseline_id if self.baseline else None,
+                "turbo_enabled": 1 if turbo == "enabled" else 0,
+                "interrupt_rate": interrupt_rate,
+                "start_temp_c": round(start_temp_c or 0.0, 2),
+                "max_temp_c": max_temp_c,
+                "min_temp_c": min_temp_c,
+                "thermal_delta_c": round(thermal_delta_c or 0.0, 2),
+                "is_cold_start": 1 if is_cold else 0,
+                "background_cpu_percent": background_cpu,
+                "process_count": process_count,
+                "rss_memory_mb": memory_after.get("rss_mb", 0),
+                "vms_memory_mb": memory_after.get("vms_mb", 0),
+                # Metadata
+                "model_name": executor.config.get("model_id", "unknown"),
+                "provider": executor.provider,
+                "task_id": task_id,
+                "country_code": country_code,
+                "workflow_type": "linear",
+                "reader_mode": self.energy_engine.energy_reader.METHOD_PROVENANCE,
+                "reader_method_id": self.energy_engine.energy_reader.METHOD_ID,
+                # ====================================================================
+                # TARGETS (what we want to predict)
+                # ====================================================================
+                "energy_j": derived.workload_energy_j,
+                "carbon_g": sustainability.carbon.grams if sustainability else 0,
+                "duration_ms": derived.duration_seconds * 1000,
+            },
+            "energy_samples": energy_samples,
+            "gpu_samples":    list(self.energy_engine.last_gpu_samples),
+            "spbm_samples":   list(self.energy_engine.last_spbm_samples),
+            "v2_samples":     list(self.energy_engine.last_v2_samples),
+            "legacy_samples": list(self.energy_engine.last_legacy_samples),
+            "rail_result":    self.energy_engine.last_rail_result,
+            "nic_samples":    list(getattr(self.energy_engine, "last_nic_samples", [])),
+            "cpu_samples": cpu_samples,
+            "interrupt_samples": interrupt_samples,
+            "io_samples":        io_samples,
+            "thermal_samples": thermal_samples,
+            "harness_timestamp": datetime.now().isoformat(),
+            "scientific_notes": {
+                "measurement_scope": "client_side_orchestration_only",
+                "layers": {
+                    "layer1_raw": "RawEnergyMeasurement (archived)",
+                    "layer2_baseline": self.baseline is not None,
+                    "layer3_derived": "DerivedEnergyMeasurement (used for analysis)",
+                },
+                "includes": [
+                    "cpu_energy",
+                    "memory_energy",
+                    "local_computation",
+                    "performance_counters",
+                ],
+                "excludes": ["model_inference_on_cloud"] if is_cloud else [],
+                "baseline_corrected": self.baseline is not None,
+            },
+        }
+
+        # ====================================================================
+        # Add high-frequency samples to result
+        # ====================================================================
+        if hasattr(self.energy_engine, "last_samples"):
+            result["energy_samples"] = list(self.energy_engine.last_samples)
+            result["gpu_samples"]    = list(self.energy_engine.last_gpu_samples)
+            result["spbm_samples"]   = list(self.energy_engine.last_spbm_samples)
+            result["v2_samples"]     = list(self.energy_engine.last_v2_samples)
+            result["rail_result"]    = self.energy_engine.last_rail_result
+            logger.info("energy samples added to result: %d", len(self.energy_engine.last_samples))
+        else:
+            logger.warning("energy_engine has no last_samples attribute")
+
+        if hasattr(self.energy_engine, "last_interrupt_samples"):
+            result["interrupt_samples"] = self.energy_engine.last_interrupt_samples
+            logger.info(
+                "interrupt samples added to result: %d",
+                len(self.energy_engine.last_interrupt_samples),
+            )
+        else:
+            logger.warning("energy_engine has no last_interrupt_samples attribute")
+
+        progress.info(
+            "measure  linear  %.2f s  dynamic %.4f J",
+            task_duration_sec, derived.workload_energy_j,
+        )
+        # 39.5.2c: run identity travels with the result (runs.global_run_id).
+        result.setdefault("ml_features", {})["global_run_id"] = _run_uid
+        return result
+
+    def run_agentic(
+        self,
+        executor,
+        task: str,
+        task_id: str = None,
+        is_cloud: bool = True,
+        country_code: str = "US",
+        run_number: int = 1,
+        tool_graph: list = None,
+        framework_type: str = "builtin",
+        tool_selector_config: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run agentic executor with synchronized energy measurement.
+
+        Same critical alignment as linear:
+        Energy measurement wraps ENTIRE agentic pipeline.
+
+        This captures ALL orchestration tax in one synchronized window:
+        - Planning
+        - Tool execution
+        - Synthesis
+        - Inter-step delays
+
+        Uses the same 3‑layer architecture and returns ALL THREE LAYERS.
+        """
+        progress.info("measure start  agentic")
+        from core.observability import status as _obs_status
+        _obs_status.set_context(phase="agentic")
+        # 39.5.2b gate entry: before the complete SPEC_39_4 3a sequence, nothing
+        # inserted between its steps (amended SPEC_39_5_2 section 4).
+        from core.observability import gate as _obs_gate
+        # 39.5.2c run identity: created before the gate, never inside 3a.
+        import uuid as _uuid
+        _run_uid = str(_uuid.uuid4())
+        _obs_gate.enter()
+        self.energy_engine.scheduler.reset_interrupt_samples()
+        # Measure network latency for cloud models
+        network_metrics = {}
+        if is_cloud:
+            network_metrics = _measure_network_latency()
+            # Inside the gate: the record is buffered and formatted after t1 (5.2a).
+            logger.info("network dns %.1f ms", network_metrics.get("dns_latency_ms", 0))
+        # ====================================================================
+        # Capture system state BEFORE run (M3-1 through M3-6)
+        # ====================================================================
+        # Capture RAPL and timestamp BEFORE pre-task instrumentation reads.
+        # This opens the diagnostic pre-task energy window.
+        # rapl.read_energy() returns None on non-RAPL platforms (PAC safe).
+        _rapl_before_pretask = self.energy_engine.rapl.read_energy()
+        _gpu_before_pretask  = ReaderFactory.get_gpu_energy_uj(self.energy_engine.rapl)
+        _pid_pre             = os.getpid()
+        _total_ticks_pre     = read_total_cpu_ticks()
+        _pid_ticks_pre       = read_process_cpu_ticks(_pid_pre)
+        _pre_task_start_perf = time.perf_counter()
+        intr_before = _read_interrupts()
+        temp_start = _read_temperature()
+        governor = get_governor()
+        turbo = get_turbo_status()
+        background_cpu = get_background_cpu()
+        process_count = get_process_count()
+        memory_before = get_process_memory()
+        is_cold = _is_cold_start(run_number)
+        # ====================================================================
+        # Step 1: Get Raw Energy Measurement (Layer 1)
+        # ====================================================================
+        run_start_dt = datetime.now()  # Human-readable start time
+        run_start_perf = time.perf_counter()  # High-precision for duration
+        self.energy_engine.start_measurement()
+        # F3: t0 anchor — read immediately after start_measurement() before any task work.
+        # Enables exact pre_task delta: rapl_at_t0 - rapl_before = pre_task_raw.
+        _rapl_at_t0 = self.energy_engine.rapl.read_energy()
+        _pid               = os.getpid()
+        _total_ticks_start = read_total_cpu_ticks()
+        _pid_ticks_start   = read_process_cpu_ticks(_pid)
+        self.energy_engine.set_workload_pid(_pid)  # Chunk 5: pass PID to interrupt sampler        
+        # SPEC 35G: framework_type="builtin" (the default every existing
+        # caller gets) preserves this exact line, unchanged. A caller that
+        # explicitly requests a different framework goes through the
+        # registry instead. run_experiment.py, test_harness.py, and
+        # optimizer_wrapper.py all construct `executor` directly and never
+        # pass framework_type — none of them are touched by this branch.
+        if framework_type != "builtin":
+            from core.execution.frameworks.bootstrap import framework_registry
+            framework = framework_registry.get(framework_type)
+            task_config = {
+                "model_config": getattr(executor, "config", {}),
+                "task": task,
+                "tool_graph": tool_graph,
+                # RAF LH 01 S1b: injector, attempt identity and run context
+                # for plugin frameworks; the builtin branch is unchanged.
+                "executor": executor,
+                "task_id": task_id,
+            }
+            framework_result = framework.execute_task(task_config, tools=[], engine=None)
+            exec_result = framework_result.metadata
+        else:
+            # SPEC 35I: energy_reader/db only constructed when a selector
+            # is actually configured — avoids a wasted DB connection on
+            # every default (no-selector) run, which is the common case.
+            # NOTE (deviation from CR-5's original assumption): harness.py
+            # does not hold a persistent db connection during a run —
+            # confirmed by grep, DatabaseManager is only constructed
+            # locally inside save_to_database() after the run completes.
+            # This opens a genuinely separate connection specifically for
+            # the selector rather than reusing an existing one. Safe under
+            # this project's WAL journal mode (concurrent readers/writers
+            # supported); documented here as an intentional deviation, not
+            # silently passed off as full CR-5 compliance.
+            if tool_selector_config:
+                from core.config_loader import ConfigLoader
+                from core.database.manager import DatabaseManager
+                executor._energy_reader = self.energy_engine.rapl
+                executor._db = DatabaseManager(ConfigLoader().get_db_config())
+            exec_result = executor.execute_comparison(
+                task, tool_graph=tool_graph, tool_selector_config=tool_selector_config,
+            )
+
+        # t1: task boundary — agentic executor has returned, all phases complete.
+        task_end_perf        = time.perf_counter()
+        _total_ticks_t1      = read_total_cpu_ticks()
+        _pid_ticks_t1        = read_process_cpu_ticks(os.getpid())
+        raw_energy = (
+            self.energy_engine.stop_measurement()
+        )  # RawEnergyMeasurement (Layer 1)
+        # rapl_after_task captured AFTER stop_measurement() so MAX(pkg_end_uj)
+        # from energy_samples cannot overshoot this anchor.
+        _rapl_after_task     = self.energy_engine.rapl.read_energy()
+        _gpu_after_task      = ReaderFactory.get_gpu_energy_uj(self.energy_engine.rapl)
+        run_end_dt           = datetime.now()   # t2: human-readable (post-framework)
+        run_end_perf         = time.perf_counter()
+        _total_ticks_t2      = read_total_cpu_ticks()
+        _pid_ticks_t2        = read_process_cpu_ticks(os.getpid())
+        # task_duration = executor time only — canonical energy denominator
+        task_duration_sec    = task_end_perf - run_start_perf
+        # post_task_duration = stop_measurement + post-processing cost (t1→t2)
+        post_task_duration_sec = run_end_perf - task_end_perf
+        # pre_task_duration = instrumentation reads before measurement (t_before→t0)
+        pre_task_duration_sec  = run_start_perf - _pre_task_start_perf
+        # framework_overhead = pre + post (total instrumentation wall time)
+        framework_overhead_sec = pre_task_duration_sec + post_task_duration_sec
+        # legacy field kept for backward compat
+        run_duration_sec = task_duration_sec
+        # 39.5.2b gate exit: after the duration computations; held records flush here.
+        _obs_window = _obs_gate.exit()
+ 
+        # ====================================================================
+        # DEBUG: Check what's available in energy_engine
+        # ====================================================================
+        logger.debug("energy_engine attributes: %s", dir(self.energy_engine))
+        if hasattr(self.energy_engine, "last_samples"):
+            logger.debug("last_samples: %s", self.energy_engine.last_samples)
+            if self.energy_engine.last_samples:
+                logger.debug("first sample type: %s", type(self.energy_engine.last_samples[0]))
+        else:
+            logger.debug("energy_engine has no 'last_samples' attribute")
+
+        # ====================================================================
+        # Load canonical metrics from override file
+        # ====================================================================
+        from pathlib import Path
+
+        import yaml
+
+        canonical_metrics = {}
+        store_extra = True
+
+        override_path = Path("config/turbostat_override.yaml")
+        if override_path.exists():
+            try:
+                with open(override_path, "r") as f:
+                    override_config = yaml.safe_load(f)
+                canonical_metrics = override_config.get("canonical_metrics", {})
+                store_extra = override_config.get("store_extra_in_json", True)
+                logger.info("loaded %d canonical metrics from override file", len(canonical_metrics))
+            except Exception as e:
+                logger.warning("failed to load override file: %s", e)
+
+        energy_samples, interrupt_samples, io_samples = process_energy_samples(self.energy_engine)
+        cpu_samples = process_cpu_samples(raw_energy, canonical_metrics, store_extra)
+
+        # Process thermal samples
+        thermal_samples = []
+        temps = []
+        throttle_events = 0
+        start_time_ns = int(run_start_dt.timestamp() * 1e9)
+
+        _raw_thermal = (
+            raw_energy.get("thermal_samples")
+            if isinstance(raw_energy, dict)
+            else getattr(raw_energy, "thermal_samples", None)
+        )
+        if _raw_thermal:
+            for thermal_tuple in _raw_thermal:
+                # Chunk 2 final: unpack 6-tuple
+                # (now, readings, throttled, sample_start_ns, sample_end_ns, interval_ns)
+                ts               = thermal_tuple[0]
+                readings         = thermal_tuple[1]
+                throttled        = thermal_tuple[2]
+                sample_start_ns  = thermal_tuple[3] if len(thermal_tuple) > 3 else None
+                sample_end_ns    = thermal_tuple[4] if len(thermal_tuple) > 4 else None
+                interval_ns      = thermal_tuple[5] if len(thermal_tuple) > 5 else None
+ 
+                time_since_start = (ts * 1e9 - start_time_ns) / 1e9
+ 
+                thermal_samples.append({
+                    "timestamp_ns":    int(ts * 1e9),   # backward compat = end time
+                    "sample_start_ns": sample_start_ns,
+                    "sample_end_ns":   sample_end_ns,
+                    "interval_ns":     interval_ns,
+                    "sample_time_s":   time_since_start,
+                    "cpu_temp":        readings.get("cpu_temp"),
+                    "system_temp":     readings.get("system_temp"),
+                    "wifi_temp":       readings.get("wifi_temp"),
+                    "throttle_event":  1 if throttled else 0,
+                    "all_zones":       readings,         # serialised to JSON in insert
+                }
+                )
+                if readings.get("cpu_temp"):
+                    temps.append(readings["cpu_temp"])
+                if throttled:
+                    throttle_events += 1
+
+        # Calculate thermal metrics
+        thermal_area = 0
+        if len(temps) > 1:
+            # Approximate thermal area (integral approximation)
+            thermal_area = sum(temps) / len(temps) * (max(temps) - min(temps))
+        # ====================================================================
+        # Calculate thermal metrics from thermal_samples (primary source)
+        # ====================================================================
+        start_temp_c, max_temp_c, min_temp_c, thermal_delta_c = (
+            calculate_thermal_metrics(cpu_samples, thermal_samples)
+        )
+
+        # ====================================================================
+        # Step 2: Compute Derived Energy (Layer 3) using Baseline (Layer 2)
+        # ====================================================================
+        derived = self.energy_analyzer.compute(
+            raw_energy, self.baseline
+        )  # DerivedEnergyMeasurement (Layer 3)
+
+        # ====================================================================
+        # Step 3: Calculate sustainability
+        # ====================================================================
+        sustainability = self.sustainability.calculate_from_derived(
+            derived, country_code=country_code, query_count=1
+        )
+
+        # ====================================================================
+        # Step 4: Energy per token
+        # ====================================================================
+        if (exec_result.get("tokens", {}).get("total") or 0) > 0:
+            energy_per_token = (
+                derived.workload_energy_j / exec_result["tokens"]["total"]
+            )
+        else:
+            energy_per_token = 0
+
+        # ====================================================================
+        # Step 5: CPU metrics from Layer 3
+        # ====================================================================
+        if hasattr(derived, "performance_counters") and derived.performance_counters:
+            cpu_metrics = {
+                "instructions": derived.performance_counters.instructions,
+                "cycles": derived.performance_counters.cpu_cycles,
+                "ipc": derived.performance_counters.instructions_per_cycle(),
+                "cache_misses": derived.performance_counters.cache_misses,
+                "context_switches": derived.performance_counters.total_context_switches(),
+            }
+        else:
+            cpu_metrics = {
+                "instructions": 0,
+                "cycles": 0,
+                "ipc": 0,
+                "cache_misses": 0,
+                "context_switches": 0,
+                "note": "Performance counters not available",
+            }
+        if hasattr(raw_energy, "scheduler_metrics") and raw_energy.scheduler_metrics:
+            swap_metrics = raw_energy.scheduler_metrics.get("swap", {})
+        else:
+            swap_metrics = {}
+
+        # Get scheduler metrics with start/end swap values
+        scheduler_start = {}
+        scheduler_end = {}
+        if hasattr(raw_energy, "scheduler_start") and raw_energy.scheduler_start:
+            scheduler_start = raw_energy.scheduler_start.get("swap", {})
+        if hasattr(raw_energy, "scheduler_end") and raw_energy.scheduler_end:
+            scheduler_end = raw_energy.scheduler_end.get("swap", {})
+
+        # ====================================================================
+        # Capture system state AFTER run
+        # ====================================================================
+        intr_after = _read_interrupts()
+        temp_max = max(temp_start, _read_temperature())
+        memory_after = get_process_memory()
+        duration = raw_energy.duration_seconds
+        interrupt_rate = get_interrupt_rate(intr_before, intr_after, duration)
+
+        # ====================================================================
+        # DEBUG: Check token data before building ml_features
+        # ====================================================================
+        logger.debug("agentic exec_result keys: %s", exec_result.keys())
+        _tok = exec_result.get("tokens", {})
+        progress.info(
+            "tokens  in %s  out %s  total %s",
+            _tok.get("prompt"), _tok.get("completion"), _tok.get("total"),
+        )
+        logger.debug("agentic tokens: %s", _tok)
+        # ====================================================================
+        # NEW: Capture orchestration events from executor
+        # ====================================================================
+        orchestration_events = []
+        if hasattr(executor, "_events") and executor._events:
+            orchestration_events = (
+                executor._events.copy()
+            )  # Copy to prevent modification
+            logger.info("orchestration events captured from executor: %d", len(orchestration_events))
+            # Clear events to prevent mixing between runs
+            executor._events = []
+        else:
+            logger.info("no orchestration events found in executor")
+
+
+
+        # ====================================================================
+        # Step 6: Return ALL THREE LAYERS with ML features
+        # ====================================================================
+        result = {
+            "experiment_id": exec_result.get("experiment_id"),
+            "task_id": task_id,
+            "workflow": "agentic",
+            "country_code": country_code,
+            "execution": exec_result,
+            # THREE LAYERS – All available for analysis
+            "layer1_raw": raw_energy.to_dict(),  # Raw hardware readings
+            "layer2_baseline": (
+                self.baseline.to_dict() if self.baseline else None
+            ),  # Idle reference
+            "layer3_derived": derived.to_dict(),  # Corrected metrics
+            # Backward compatibility
+            "raw_energy": raw_energy.to_dict(),
+            "derived_energy": derived.to_dict(),
+            # Other metrics
+            "sustainability": sustainability.to_dict() if sustainability else None,
+            "network_metrics": network_metrics,
+            "energy_per_token": energy_per_token,
+            "cpu_metrics": cpu_metrics,
+            "orchestration_events": orchestration_events,
+            "pending_interactions": exec_result.get("pending_interactions", []),
+            # ====================================================================
+            # NEW: ML Features Dictionary (ALL features for training)
+            # ====================================================================
+            "ml_features": {
+                # Same hardware metrics as linear
+                "start_time_ns": int(run_start_dt.timestamp() * 1_000_000_000),
+                "end_time_ns": int(run_end_dt.timestamp() * 1_000_000_000),
+                "start_time_iso": run_start_dt.isoformat(),
+                "end_time_iso": run_end_dt.isoformat(),
+                "duration_sec": task_duration_sec,           # task only (corrected)
+                "duration_ms": task_duration_sec * 1000,
+                "task_duration_sec": task_duration_sec,
+                "task_duration_ns": int(task_duration_sec * 1_000_000_000),
+                "post_task_duration_ns": int(post_task_duration_sec * 1_000_000_000),
+                # Bug 8 fix: direct RAPL delta for post_task window [t1, t2].
+                # None on non-RAPL platforms — PAC compliant.
+                "framework_overhead_ns": int(framework_overhead_sec * 1_000_000_000),
+                "framework_overhead_sec": framework_overhead_sec,
+                "total_run_duration_sec": run_end_perf - _pre_task_start_perf,
+                "pre_task_duration_sec": pre_task_duration_sec,
+                # 39.5.2b window provenance (None when the gate never engaged)
+                "measurement_log_level":       _obs_window["measurement_log_level"],
+                "measurement_log_config_hash": _obs_window["measurement_log_config_hash"],
+                "observability_overflow":      _obs_window["observability_overflow"],
+                "measurement_heartbeat_s":     _obs_window.get("measurement_heartbeat_s"),
+                "post_task_duration_sec":  post_task_duration_sec,
+                "rapl_before_pretask":     _rapl_before_pretask,   # Dict or None
+                "rapl_at_t0":              _rapl_at_t0,             # Dict or None — t0 anchor
+                "rapl_after_task":         _rapl_after_task,        # Dict or None
+                "gpu_before_pretask":      _gpu_before_pretask,    # µJ or None
+                "gpu_after_task":          _gpu_after_task,         # µJ or None
+                "cpu_frac_pre":            compute_cpu_fraction(
+                    _pid_ticks_start - _pid_ticks_pre,
+                    _total_ticks_start - _total_ticks_pre,
+                ),
+                "cpu_frac_post":           compute_cpu_fraction(
+                    _pid_ticks_t2 - _pid_ticks_t1,
+                    _total_ticks_t2 - _total_ticks_t1,
+                ),                
+                "duration_includes_overhead": 0,              # corrected run
+                "instructions": derived.instructions,
+                "pkg_energy_uj": derived.package_energy_uj,
+                "core_energy_uj": derived.core_energy_uj,
+                "uncore_energy_uj": derived.uncore_energy_uj,
+                "dram_energy_uj": (
+                    derived.dram_energy_uj if hasattr(derived, "dram_energy_uj") else 0
+                ),
+                "idle_energy_uj": derived.idle_energy_uj,
+                "dynamic_energy_uj":     derived.workload_energy_uj,
+                "pid":                   _pid,
+                "cpu_fraction":          compute_cpu_fraction(read_process_cpu_ticks(_pid) - _pid_ticks_start, read_total_cpu_ticks() - _total_ticks_start),
+                "attributed_energy_uj":  int((read_process_cpu_ticks(_pid) - _pid_ticks_start) / max(read_total_cpu_ticks() - _total_ticks_start, 1) * max(derived.workload_energy_uj, 0)),              
+                "baseline_energy_uj":    derived.idle_energy_uj,
+                "avg_power_watts":       derived.workload_energy_uj / max(1, derived.duration_seconds) / 1_000_000,
+                "orchestration_tax_uj": derived.orchestration_tax_uj,
+                # GPU PP1 energy — None on non-Tiger-Lake platforms
+                "gpu_total_energy_uj":    derived.gpu_total_energy_uj,
+                "gpu_baseline_energy_uj": derived.gpu_baseline_energy_uj,
+                "gpu_dynamic_energy_uj":  derived.gpu_dynamic_energy_uj,
+                "gpu_pct_of_pkg":         derived.gpu_pct_of_pkg,
+                "gpu_dynamic_method":     derived.gpu_dynamic_method,
+                "gpu_idle_power_w_used":  derived.gpu_idle_power_w_used,
+                # SPEC_SPBM_FULL_TELEMETRY: in-memory attributes carried
+                # through for _run_post_etl's process_spbm_telemetry step.
+                "power_limits_snapshot":   getattr(self.energy_engine, "power_limits_snapshot", None),
+                "spbm_telemetry_coverage": getattr(self.energy_engine, "spbm_telemetry_coverage", None),               
+                "cycles": derived.cycles,
+                "ipc": derived.ipc,
+                "cache_misses": derived.cache_misses,
+                "cache_references": derived.cache_references,
+                "cache_miss_rate": (
+                    derived.cache_misses / derived.cache_references
+                    if derived.cache_references > 0
+                    else 0
+                ),
+                "page_faults": (
+                    _perf_field(raw_energy.perf, "minor_page_faults") +
+                    _perf_field(raw_energy.perf, "major_page_faults")
+                ),
+                "major_page_faults": (
+                    _perf_field(raw_energy.perf, "major_page_faults")
+                ),
+                "minor_page_faults": (
+                    _perf_field(raw_energy.perf, "minor_page_faults")
+                ),
+                "context_switches_voluntary": derived.context_switches_voluntary,
+                "context_switches_voluntary": derived.context_switches_voluntary,
+                "context_switches_involuntary": derived.context_switches_involuntary,
+                "total_context_switches": derived.total_context_switches,
+                "thread_migrations": derived.thread_migrations,
+                "run_queue_length": derived.run_queue_length,
+                "kernel_time_ms": derived.kernel_time_ms,
+                "user_time_ms": derived.user_time_ms,
+                "frequency_mhz": derived.frequency_mhz if derived.frequency_mhz else 0,
+                "cpu_active_ratio": derived.cpu_active_ratio,
+                "package_temp_celsius": derived.package_temp_celsius,
+                "baseline_temp_celsius": (
+                    self.baseline.cpu_temperature_c if self.baseline else None
+                ),
+                "thermal_metrics": {
+                    "min_temp_c": min(temps) if temps else 0,
+                    "max_temp_c": max(temps) if temps else 0,
+                    "avg_temp_c": sum(temps) / len(temps) if temps else 0,
+                    "thermal_area": thermal_area,
+                    "throttle_events": throttle_events,
+                    "throttle_ratio": (
+                        throttle_events / len(thermal_samples) if thermal_samples else 0
+                    ),
+                },
+                # C-state metrics
+                "c2_time_seconds": derived.c2_time_seconds,
+                "c3_time_seconds": derived.c3_time_seconds,
+                "c6_time_seconds": derived.c6_time_seconds,
+                "c7_time_seconds": derived.c7_time_seconds,
+                # Swap metrics
+                # Swap metrics
+                "swap_total_mb": swap_metrics.get("swap_total_mb"),
+                "swap_end_free_mb": swap_metrics.get("swap_free_mb"),
+                "swap_start_used_mb": scheduler_start.get("swap_used_mb"),
+                "swap_end_used_mb": scheduler_end.get("swap_used_mb"),
+                "swap_start_cached_mb": scheduler_start.get("swap_cached_mb"),
+                "swap_end_cached_mb": scheduler_end.get("swap_cached_mb"),
+                "swap_end_percent": swap_metrics.get("swap_percent"),
+                # Ring bus
+                "ring_bus_freq_mhz": derived.ring_bus_current_mhz,
+                "wakeup_latency_us": derived.wakeup_latency_us,
+                # Thermal validity
+                "thermal_during_experiment": derived.thermal_during_experiment,
+                "thermal_now_active": derived.thermal_now_active,
+                "thermal_since_boot": derived.thermal_since_boot,
+                "experiment_valid": (
+                    derived.thermal_during_experiment == 0
+                    and derived.thermal_now_active == 0
+                ),
+                # Token metrics
+                "total_tokens": exec_result.get("tokens", {}).get("total"),
+                "prompt_tokens": exec_result.get("tokens", {}).get("prompt"),
+                "completion_tokens": exec_result.get("tokens", {}).get("completion"),
+                "bytes_sent": exec_result.get("total_bytes_sent", 0),
+                "bytes_recv": exec_result.get("total_bytes_recv", 0),
+                "total_non_local_ms": exec_result.get("total_workflow_non_local_ms", 0),
+                "effective_throughput_kbps": exec_result.get("effective_throughput_kbps", 0),
+                "tcp_retransmits": exec_result.get("total_tcp_retransmits"),
+
+                # ====================================================================
+                # AGENTIC-SPECIFIC FEATURES
+                # ====================================================================
+                "planning_time_ms": exec_result.get("phase_times", {}).get(
+                    "planning_ms", 0
+                ),
+                "execution_time_ms": exec_result.get("phase_times", {}).get(
+                    "execution_ms", 0
+                ),
+                "synthesis_time_ms": exec_result.get("phase_times", {}).get(
+                    "synthesis_ms", 0
+                ),
+                "phase_planning_ratio": (
+                    exec_result.get("phase_ratios", {}).get("planning_ratio", 0)
+                    if exec_result.get("phase_ratios")
+                    else 0
+                ),
+                "phase_execution_ratio": (
+                    exec_result.get("phase_ratios", {}).get("execution_ratio", 0)
+                    if exec_result.get("phase_ratios")
+                    else 0
+                ),
+                "phase_synthesis_ratio": (
+                    exec_result.get("phase_ratios", {}).get("synthesis_ratio", 0)
+                    if exec_result.get("phase_ratios")
+                    else 0
+                ),
+                "llm_calls": exec_result.get("llm_calls", 1),
+                "tool_calls": exec_result.get("tool_count", 0),
+                "tools_used": len(exec_result.get("tools_used", [])),
+                "steps": exec_result.get("steps", 1),
+                "avg_step_time_ms": exec_result.get("avg_step_time_ms", 0),
+                "orchestration_cpu_ms": exec_result.get("orchestration_cpu_ms", 0),
+                "complexity_level": exec_result.get("complexity_level", 1),
+                "complexity_score": exec_result.get("complexity_score", {}).get(
+                    "raw_score", 0
+                ),
+                # Network
+                "dns_latency_ms": network_metrics.get("dns_latency_ms", 0),
+                "api_latency_ms": exec_result.get("api_latency_ms", 0),
+                "compute_time_ms": exec_result.get(
+                    "compute_time_ms", exec_result.get("total_time_ms", 0)
+                ),
+                # =============================================================
+                # NEW: System State Metrics (ADD THESE)
+                # =============================================================
+                "governor": governor,
+                "baseline_id": self.baseline.baseline_id if self.baseline else None,
+                "turbo_enabled": 1 if turbo == "enabled" else 0,
+                "interrupt_rate": interrupt_rate,
+                "start_temp_c": round(start_temp_c or 0.0, 2),
+                "max_temp_c": max_temp_c,
+                "min_temp_c": min_temp_c,
+                "thermal_delta_c": round(thermal_delta_c or 0.0, 2),
+                "is_cold_start": 1 if is_cold else 0,
+                "background_cpu_percent": background_cpu,
+                "process_count": process_count,
+                "rss_memory_mb": memory_after.get("rss_mb", 0),
+                "vms_memory_mb": memory_after.get("vms_mb", 0),
+                # Metadata
+                "model_name": executor.config.get("model_id", "unknown"),
+                "provider": executor.provider,
+                "task_id": task_id,
+                "country_code": country_code,
+                "workflow_type": "agentic",
+                "reader_mode": self.energy_engine.energy_reader.METHOD_PROVENANCE,
+                "reader_method_id": self.energy_engine.energy_reader.METHOD_ID,
+                # ====================================================================
+                # TARGETS
+                # ====================================================================
+                "energy_j": derived.workload_energy_j,
+                "orchestration_tax_j": derived.orchestration_tax_j,
+                "carbon_g": sustainability.carbon.grams if sustainability else 0,
+                "duration_ms": derived.duration_seconds * 1000,
+            },
+            "energy_samples": energy_samples,
+            "gpu_samples":    list(self.energy_engine.last_gpu_samples),
+            "spbm_samples":   list(self.energy_engine.last_spbm_samples),
+            "v2_samples":     list(self.energy_engine.last_v2_samples),
+            "legacy_samples": list(self.energy_engine.last_legacy_samples),
+            "rail_result":    self.energy_engine.last_rail_result,
+            "nic_samples":    list(getattr(self.energy_engine, "last_nic_samples", [])),
+            "cpu_samples": cpu_samples,
+            "interrupt_samples": interrupt_samples,
+            "io_samples":        io_samples,
+            "thermal_samples": thermal_samples,
+            "harness_timestamp": datetime.now().isoformat(),
+            "scientific_notes": {
+                "measurement_scope": "client_side_orchestration_only",
+                "layers": {
+                    "layer1_raw": "RawEnergyMeasurement (archived)",
+                    "layer2_baseline": self.baseline is not None,
+                    "layer3_derived": "DerivedEnergyMeasurement (used for analysis)",
+                },
+                "includes": [
+                    "planning",
+                    "tool_execution",
+                    "synthesis",
+                    "cpu_energy",
+                    "performance_counters",
+                ],
+                "excludes": ["model_inference_on_cloud"] if is_cloud else [],
+                "baseline_corrected": self.baseline is not None,
+            },
+        }
+
+        # ====================================================================
+        # Add high-frequency samples to result
+        # ====================================================================
+        if hasattr(self.energy_engine, "last_samples"):
+            result["energy_samples"] = list(self.energy_engine.last_samples)
+            result["gpu_samples"]    = list(self.energy_engine.last_gpu_samples)
+            result["spbm_samples"]   = list(self.energy_engine.last_spbm_samples)
+            result["v2_samples"]     = list(self.energy_engine.last_v2_samples)
+            result["legacy_samples"]     = list(self.energy_engine.last_legacy_samples)
+            result["rail_result"]    = self.energy_engine.last_rail_result
+            logger.info("energy samples added to result: %d", len(self.energy_engine.last_samples))
+        else:
+            logger.warning("energy_engine has no last_samples attribute")
+
+        if hasattr(self.energy_engine, "last_interrupt_samples"):
+            result["interrupt_samples"] = self.energy_engine.last_interrupt_samples
+            logger.info(
+                "interrupt samples added to result: %d",
+                len(self.energy_engine.last_interrupt_samples),
+            )
+        else:
+            logger.warning("energy_engine has no last_interrupt_samples attribute")
+
+        # ====================================================================
+        # DEBUG - Check orchestration events before returning
+        # ====================================================================
+        logger.debug("orchestration_events in result: %s", "orchestration_events" in result)
+        if "orchestration_events" in result:
+            logger.info("orchestration events in result: %d", len(result["orchestration_events"]))
+            if len(result["orchestration_events"]) > 0:
+                logger.debug("first event keys: %s", result["orchestration_events"][0].keys())
+        logger.debug("thermal_samples in result: %s", "thermal_samples" in result)
+        if "thermal_samples" in result:
+            logger.info("thermal samples in result: %d", len(result["thermal_samples"]))
+        progress.info(
+            "measure  agentic  %.2f s  dynamic %.4f J",
+            task_duration_sec, derived.workload_energy_j,
+        )
+        # 39.5.2c: run identity travels with the result (runs.global_run_id).
+        result.setdefault("ml_features", {})["global_run_id"] = _run_uid
+        return result
+
+    def run_comparison(
+        self,
+        linear_executor,
+        agentic_executor,
+        task: str,
+        task_id: str = None,
+        cool_down: Optional[int] = None,
+        n_repetitions: int = 30,
+        include_warmup: bool = True,
+        country_code: str = "US",
+        hardware_info: Optional[Dict] = None,
+        save_to_db: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Run multiple comparisons with warmup and statistical analysis.
+
+        This is the publishable experimental protocol:
+        1. Warmup run (discarded) to stabilize system
+        2. N repetitions of (linear + cool‑down + agentic)
+        3. Statistical analysis of all runs
+
+        Returns results with ALL THREE LAYERS for each run.
+        """
+        progress.info("comparison  linear vs agentic  repetitions %d", n_repetitions)
+        logger.info("task length %d chars", len(task))
+        logger.debug("task: %.80s", task)
+
+        # ====================================================================
+        # Initialize results collection
+        # ====================================================================
+        self._collected_samples = {
+            "energy_samples": [],  # Flat list (backward compatibility)
+            "cpu_samples": [],  # Flat list
+            "interrupt_samples": [],  # Flat list
+            "energy_samples_by_run": [],  # NEW: list of lists
+            "cpu_samples_by_run": [],  # NEW: list of lists
+            "interrupt_samples_by_run": [],  # NEW: list of lists
+        }
+
+        # Determine if cloud model (check provider)
+        is_cloud = linear_executor.provider != "ollama"
+
+        # Set cool‑down period
+        if cool_down is None:
+            cool_down = self.config.get_settings().experiment.cool_down_seconds
+
+        # Warmup run (optional, recommended)
+        if include_warmup:
+            progress.info("repetition %d/%d", i + 1, n_repetitions)
+            from core.observability import status as _obs_status
+            _obs_status.set_context(rep=i + 1, total=n_repetitions)
+            _warmup_run(linear_executor, task, is_agentic=False)
+            time.sleep(cool_down)
+            _warmup_run(agentic_executor, task, is_agentic=True)
+            time.sleep(cool_down)
+
+        # Storage for all runs
+        all_linear = []
+        all_agentic = []
+        all_taxes = []
+
+        for i in range(n_repetitions):
+            progress.info("repetition %d/%d", i + 1, n_repetitions)
+            from core.observability import status as _obs_status
+            _obs_status.set_context(rep=i + 1, total=n_repetitions)
+
+            # Determine workflow order for this repetition
+            first_workflow, second_workflow = get_workflow_order(i + 1)
+
+            # Execute first workflow
+            if first_workflow == "linear":
+                linear_result = self.run_linear(
+                    linear_executor,
+                    task,
+                    task_id,
+                    is_cloud,
+                    country_code=country_code,
+                    run_number=i + 1,
+                )
+                agentic_result = self.run_agentic(
+                    agentic_executor,
+                    task,
+                    task_id,
+                    is_cloud,
+                    country_code=country_code,
+                    run_number=i + 1,
+                )
+            else:
+                agentic_result = self.run_agentic(
+                    agentic_executor,
+                    task,
+                    task_id,
+                    is_cloud,
+                    country_code=country_code,
+                    run_number=i + 1,
+                )
+                linear_result = self.run_linear(
+                    linear_executor,
+                    task,
+                    task_id,
+                    is_cloud,
+                    country_code=country_code,
+                    run_number=i + 1,
+                )
+
+            # Store results
+            all_linear.append(linear_result)
+            all_agentic.append(agentic_result)
+
+            # Collect samples from both runs
+            for result in [linear_result, agentic_result]:
+                if "energy_samples" in result:
+                    self._collected_samples["energy_samples"].extend(
+                        result["energy_samples"]
+                    )
+                if "cpu_samples" in result:
+                    self._collected_samples["cpu_samples"].extend(result["cpu_samples"])
+                if "interrupt_samples" in result:
+                    self._collected_samples["interrupt_samples"].extend(
+                        result["interrupt_samples"]
+                    )
+
+            # ====================================================================
+            # SAVE IMMEDIATELY if save_to_db is True
+            # ====================================================================
+
+            # Cool‑down between repetitions (except last)
+            if i < n_repetitions - 1:
+                progress.info("cool down %s s", cool_down)
+                from core.observability import status as _obs_status
+                _obs_status.wait(cool_down, "cool down")
+
+            # ====================================================================
+            # YOUR EXISTING TAX CALCULATION CODE (PRESERVED)
+            # ====================================================================
+            ##temporary debug
+            logger.debug("linear layer3_derived keys: %s", linear_result["layer3_derived"].keys())
+
+            # Compute tax for this pair (using Layer 3 workload energy)
+            linear_layer3 = linear_result["layer3_derived"]
+            agentic_layer3 = agentic_result["layer3_derived"]
+
+            # Debug to see actual structure
+            logger.debug("linear_layer3 keys: %s", list(linear_layer3.keys()))
+            if "energy_uj" in linear_layer3:
+                logger.debug("energy_uj keys: %s", list(linear_layer3["energy_uj"].keys()))
+
+            # Extract linear workload energy from the nested structure
+            if (
+                "energy_uj" in linear_layer3
+                and "workload" in linear_layer3["energy_uj"]
+            ):
+                linear_energy = linear_layer3["energy_uj"]["workload"] / 1_000_000
+            else:
+                logger.warning(
+                    f"Could not find workload energy. Keys: {list(linear_layer3.keys())}"
+                )
+                linear_energy = 0
+
+            # Extract agentic workload energy
+            if (
+                "energy_uj" in agentic_layer3
+                and "workload" in agentic_layer3["energy_uj"]
+            ):
+                agentic_energy = agentic_layer3["energy_uj"]["workload"] / 1_000_000
+            else:
+                logger.warning(
+                    f"Could not find workload energy. Keys: {list(agentic_layer3.keys())}"
+                )
+                agentic_energy = 0
+
+            tax = agentic_energy / linear_energy if linear_energy > 0 else 0
+            all_taxes.append(tax)
+
+            all_taxes.append(tax)
+
+            # ====================================================================
+            # Collect orchestration events from agentic run (with protection)
+            # ====================================================================
+            try:
+                if agentic_result and "orchestration_events" in agentic_result:
+                    if "orchestration_events_by_run" not in self._collected_samples:
+                        self._collected_samples["orchestration_events_by_run"] = []
+                    self._collected_samples["orchestration_events_by_run"].append(
+                        agentic_result["orchestration_events"]
+                    )
+                    logger.info(
+                        "orchestration events collected: %d",
+                        len(agentic_result["orchestration_events"]),
+                    )
+                else:
+                    logger.info("no orchestration events in agentic result")
+                    # Add empty list to maintain alignment (ADD THIS BACK)
+                    if "orchestration_events_by_run" not in self._collected_samples:
+                        self._collected_samples["orchestration_events_by_run"] = []
+                    self._collected_samples["orchestration_events_by_run"].append([])
+            except Exception as e:
+                logger.warning("error collecting orchestration events: %s", e)
+                if "orchestration_events_by_run" not in self._collected_samples:
+                    self._collected_samples["orchestration_events_by_run"] = []
+                self._collected_samples["orchestration_events_by_run"].append([])
+
+            # Cool‑down between repetitions (except last)
+            if i < n_repetitions - 1:
+                time.sleep(cool_down)
+        # ====================================================================
+        # Calculate heat flux for all runs (using baseline temperature)
+        # ====================================================================
+        # Get baseline temperature from the baseline measurement
+        baseline_temp = None
+        if self.baseline and hasattr(self.baseline, "cpu_temperature_c"):
+            baseline_temp = self.baseline.cpu_temperature_c
+
+        # Calculate heat flux for each run
+        for run in all_linear + all_agentic:
+            if "ml_features" in run:
+                current_temp = run["ml_features"].get("package_temp_celsius")
+
+                if current_temp and baseline_temp:
+                    # Temperature rise from baseline
+                    temp_rise = current_temp - baseline_temp
+                    duration = (
+                        run["ml_features"].get("duration_ms", 0) / 1000
+                    )  # seconds
+
+                    if duration > 0:
+                        heat_flux = temp_rise / duration  # °C per second
+                        run["ml_features"]["heat_flux"] = heat_flux
+                        logger.info(
+                            "heat flux %.2f C/s for run %s",
+                            heat_flux, run["ml_features"].get("run_number", "?"),
+                        )
+
+        # ====================================================================
+        # Build grouped samples in correct order (all linear first, then all agentic)
+        # ====================================================================
+        # Energy samples
+        self._collected_samples["energy_samples_by_run"] = []
+        for run in all_linear:
+            if "energy_samples" in run:
+                self._collected_samples["energy_samples_by_run"].append(
+                    run["energy_samples"]
+                )
+        for run in all_agentic:
+            if "energy_samples" in run:
+                self._collected_samples["energy_samples_by_run"].append(
+                    run["energy_samples"]
+                )
+
+        # CPU samples
+        self._collected_samples["cpu_samples_by_run"] = []
+        for run in all_linear:
+            if "cpu_samples" in run:
+                self._collected_samples["cpu_samples_by_run"].append(run["cpu_samples"])
+        for run in all_agentic:
+            if "cpu_samples" in run:
+                self._collected_samples["cpu_samples_by_run"].append(run["cpu_samples"])
+
+        # Interrupt samples
+        self._collected_samples["interrupt_samples_by_run"] = []
+        for run in all_linear:
+            if "interrupt_samples" in run:
+                self._collected_samples["interrupt_samples_by_run"].append(
+                    run["interrupt_samples"]
+                )
+        for run in all_agentic:
+            if "interrupt_samples" in run:
+                self._collected_samples["interrupt_samples_by_run"].append(
+                    run["interrupt_samples"]
+                )
+
+        logger.info(
+            "grouped samples energy=%d cpu=%d interrupt=%d",
+            len(self._collected_samples["energy_samples_by_run"]),
+            len(self._collected_samples["cpu_samples_by_run"]),
+            len(self._collected_samples["interrupt_samples_by_run"]),
+        )
+
+        # ====================================================================
+        # Statistical analysis
+        # ====================================================================
+
+        logger.info("agentic interrupt samples: %d", len(agentic_result.get("interrupt_samples", [])))
+
+        # Extract energy values from Layer 3 (DerivedEnergyMeasurement)
+
+        linear_energies = [
+            r["layer3_derived"]["energy_uj"]["workload"] / 1_000_000 for r in all_linear
+        ]
+
+        agentic_energies = [
+            r["layer3_derived"]["energy_uj"]["workload"] / 1_000_000
+            for r in all_agentic
+        ]
+
+        linear_times = [r["execution"]["execution_time_ms"] for r in all_linear]
+        agentic_times = [r["execution"]["total_time_ms"] for r in all_agentic]
+
+        # Energy per token from Layer 3
+        linear_ept = [r["energy_per_token"] for r in all_linear]
+        agentic_ept = [r["energy_per_token"] for r in all_agentic]
+
+        # ====================================================================
+        # Collect raw events from agentic runs (store temporarily)
+        # ====================================================================
+        raw_agentic_events = []
+        for i, result in enumerate(all_agentic):
+            if result and "orchestration_events" in result:
+                raw_agentic_events.append(result["orchestration_events"])
+                logger.info(
+                    "orchestration events from agentic run %d: %d",
+                    i + 1, len(result["orchestration_events"]),
+                )
+            else:
+                raw_agentic_events.append([])
+                logger.info("no orchestration events in agentic run %d", i + 1)
+
+        # ====================================================================
+        # Build grouped samples after the loop
+        # ====================================================================
+        # Build energy_samples_by_run in order: [L1, L2, L3, A1, A2, A3]
+        self._collected_samples["energy_samples_by_run"] = [
+            run["energy_samples"] for run in all_linear if "energy_samples" in run
+        ] + [run["energy_samples"] for run in all_agentic if "energy_samples" in run]
+
+        self._collected_samples["cpu_samples_by_run"] = [
+            run["cpu_samples"] for run in all_linear if "cpu_samples" in run
+        ] + [run["cpu_samples"] for run in all_agentic if "cpu_samples" in run]
+
+        self._collected_samples["interrupt_samples_by_run"] = [
+            run["interrupt_samples"] for run in all_linear if "interrupt_samples" in run
+        ] + [
+            run["interrupt_samples"]
+            for run in all_agentic
+            if "interrupt_samples" in run
+        ]
+
+        # ====================================================================
+        # Build orchestration events by run (AGENTIC ONLY)
+        # ====================================================================
+        # For orchestration events, we only have them for agentic runs
+        # But we need to place them in the same order as runs:
+        # [L1, L2, L3, A1, A2, A3] → So first n_repetitions entries are empty lists
+        orchestration_events_by_run = []
+
+        # Add empty lists for linear runs
+        for _ in range(n_repetitions):
+            orchestration_events_by_run.append([])
+
+        # Add events for agentic runs (using raw_agentic_events collected above)
+        orchestration_events_by_run.extend(raw_agentic_events)
+        logger.info("agentic event groups added: %d", len(raw_agentic_events))
+
+        results = {
+            "task": task,
+            "task_id": task_id,
+            "n_repetitions": n_repetitions,
+            "cool_down_seconds": cool_down,
+            "is_cloud": is_cloud,
+            "statistics": {
+                "linear_energy_j": calc_stats(linear_energies),
+                "agentic_energy_j": calc_stats(agentic_energies),
+                "linear_time_ms": calc_stats(linear_times),
+                "agentic_time_ms": calc_stats(agentic_times),
+                "orchestration_tax": calc_stats(all_taxes),
+                "linear_energy_per_token": calc_stats(linear_ept),
+                "agentic_energy_per_token": calc_stats(agentic_ept),
+            },
+            "all_runs": {
+                "linear": [r["experiment_id"] for r in all_linear],
+                "agentic": [r["experiment_id"] for r in all_agentic],
+                "taxes": all_taxes,
+            },
+            "scientific_notes": {
+                "measurement_scope": "client_side_orchestration_only",
+                "layers": {
+                    "layer1_raw": "RawEnergyMeasurement (archived per run)",
+                    "layer2_baseline": self.baseline is not None,
+                    "layer3_derived": "DerivedEnergyMeasurement (used for analysis)",
+                },
+                "includes": [
+                    "cpu_energy",
+                    "memory_energy",
+                    "local_computation",
+                    "orchestration_overhead",
+                ],
+                "excludes": ["model_inference_on_cloud"] if is_cloud else [],
+                "baseline_corrected": self.baseline is not None,
+                "warmup_performed": include_warmup,
+                "statistical_method": "Student's t-test, 95% CI",
+            },
+        }
+
+        # ====================================================================
+        # Add collected samples to results
+        # ====================================================================
+        if hasattr(self, "_collected_samples"):
+            results["energy_samples"] = self._collected_samples.get(
+                "energy_samples", []
+            )
+            results["cpu_samples"] = self._collected_samples.get("cpu_samples", [])
+            results["interrupt_samples"] = self._collected_samples.get(
+                "interrupt_samples", []
+            )
+            # NEW: Add per-run samples
+            results["energy_samples_by_run"] = self._collected_samples.get(
+                "energy_samples_by_run", []
+            )
+            results["cpu_samples_by_run"] = self._collected_samples.get(
+                "cpu_samples_by_run", []
+            )
+            results["interrupt_samples_by_run"] = self._collected_samples.get(
+                "interrupt_samples_by_run", []
+            )
+            results["orchestration_events_by_run"] = orchestration_events_by_run
+
+            logger.info(
+                "final result samples energy=%d cpu=%d interrupt=%d",
+                len(results["energy_samples"]), len(results["cpu_samples"]),
+                len(results["interrupt_samples"]),
+            )
+
+        # Print summary
+        _st = results["statistics"]
+        console.section("experiment summary")
+        console.kv("linear energy", "%.4f ± %.4f J" % (
+            _st["linear_energy_j"]["mean"], _st["linear_energy_j"]["std"]))
+        console.kv("agentic energy", "%.4f ± %.4f J" % (
+            _st["agentic_energy_j"]["mean"], _st["agentic_energy_j"]["std"]))
+        console.kv("orchestration tax", "%.2fx  95%% CI [%.2f, %.2f]" % (
+            _st["orchestration_tax"]["mean"], _st["orchestration_tax"]["ci_lower"],
+            _st["orchestration_tax"]["ci_upper"]))
+        console.kv("energy per token", "linear %.6f J/tok  agentic %.6f J/tok" % (
+            _st["linear_energy_per_token"]["mean"], _st["agentic_energy_per_token"]["mean"]))
+        # ====================================================================
+        # Display ALL hardware parameters from Layer 1 (25 requirements)
+        # ====================================================================
+        console.section("hardware parameters (layer 1, all 25 requirements)")
+
+        # display_hardware(all_linear, "LINEAR")
+        # display_hardware(all_agentic, "AGENTIC")
+        for i in range(len(all_linear)):
+            display_hardware([all_linear[i]], f"LINEAR Run {i+1}")
+            if i < len(all_agentic):
+                display_hardware([all_agentic[i]], f"AGENTIC Run {i+1}")
+
+        display_ipc_analysis(all_linear, all_agentic)
+
+        # ====================================================================
+        # Helper function to calculate sustainability stats (ENHANCED with energy)
+        # ====================================================================
+        def calc_sustainability_stats(runs, label):
+            """Calculate and display sustainability stats with energy for consistency check."""
+            if not runs or not runs[0].get("sustainability"):
+                return None
+
+            carbon_total = 0
+            water_total = 0
+            methane_total = 0
+            energy_total = 0  # ← NEW
+            count = 0
+
+            for run in runs:
+                sus = run.get("sustainability", {})
+                if sus:
+                    if "carbon" in sus:
+                        carbon_total += sus["carbon"].get("grams", 0)
+                    if "water" in sus:
+                        water_total += sus["water"].get("milliliters", 0)
+                    if "methane" in sus:
+                        methane_total += sus["methane"].get("grams", 0)
+
+                    # ← NEW: Get energy from layer3_derived
+                    derived = run.get("layer3_derived", {})
+                    energy_uj = derived.get("energy_uj", {})
+                    energy_total += energy_uj.get("workload", 0) / 1_000_000
+
+                    count += 1
+
+            if count > 0:
+                carbon_mean = carbon_total / count
+                energy_mean = energy_total / count
+
+                console.line("")
+                console.line("%s workflow (%d runs)" % (label, count), indent=1)
+                console.kv("grid region", runs[0].get("country_code", "US"), indent=2)
+                console.kv("energy", "%.6f J" % energy_mean, indent=2)
+                console.kv("carbon", "%.6f g CO2e" % carbon_mean, indent=2)
+                console.kv("water", "%.6f ml" % (water_total / count), indent=2)
+                console.kv("methane", "%.6f g CH4" % (methane_total / count), indent=2)
+
+            return {
+                "energy": energy_total / count if count > 0 else 0,  # ← NEW
+                "carbon": carbon_total / count if count > 0 else 0,
+                "water": water_total / count if count > 0 else 0,
+                "methane": methane_total / count if count > 0 else 0,
+                "count": count,
+            }
+
+        # ====================================================================
+        # SECTION 1: GRID FACTORS & SOURCES (Shown once)
+        # ====================================================================
+
+        display_sustainability_header(all_linear)
+        # ====================================================================
+        # SECTION 2: PER-WORKFLOW METRICS (Clean table format)
+        # ====================================================================
+        linear_stats = calc_sustainability_stats(all_linear, "LINEAR")
+        agentic_stats = calc_sustainability_stats(all_agentic, "AGENTIC")
+
+        display_workflow_comparison(linear_stats, agentic_stats)
+
+        # ====================================================================
+        # SECTION 3: DERIVED METRICS (Tax, Reasoning, Scarcity)
+        # ====================================================================
+        if linear_stats and agentic_stats:
+            wait_tax_energy = agentic_stats["energy"] - linear_stats["energy"]
+            reasoning_ratio = (
+                (linear_stats["energy"] / agentic_stats["energy"]) * 100
+                if agentic_stats["energy"] > 0
+                else 0
+            )
+
+            console.section("derived metrics")
+            console.line("[2.8] wait tax per query", indent=1)
+            console.kv("energy", "%.4f J" % wait_tax_energy, indent=2)
+            console.kv("carbon", "%.3f mg" % (
+                (agentic_stats["carbon"] - linear_stats["carbon"]) * 1000), indent=2)
+            console.line("[2.11] reasoning to waste", indent=1)
+            console.kv("reasoning", "%.1f%%" % reasoning_ratio, indent=2)
+            console.kv("waste", "%.1f%%" % (100 - reasoning_ratio), indent=2)
+            # Energy Scarcity Index (Req 2.13)
+            console.line("[2.13] energy scarcity index", indent=1)
+            console.kv("linear", "%.8f" % (linear_stats["energy"] / 3.6e6 / 10), indent=2)
+            console.kv("agentic", "%.8f" % (agentic_stats["energy"] / 3.6e6 / 10), indent=2)
+
+        # ====================================================================
+        # SECTION 4: MODULE 3 EXECUTION METRICS
+        # ====================================================================
+        if all_agentic:
+            console.section("execution metrics (module 3)")
+
+            total_llm = 0
+            total_tools = 0
+            total_steps = 0
+            total_plan = 0
+            total_exec = 0
+            total_syn = 0
+            complexity_sum = 0
+
+            for run in all_agentic:
+                exec_data = run.get("execution", {})
+                total_llm += exec_data.get("llm_calls", 0)
+                total_tools += exec_data.get("tool_count", 0)
+                total_steps += exec_data.get("steps", 0)
+
+                phase_times = exec_data.get("phase_times", {})
+                total_plan += phase_times.get("planning_ms", 0)
+                total_exec += phase_times.get("execution_ms", 0)
+                total_syn += phase_times.get("synthesis_ms", 0)
+
+                complexity = exec_data.get("complexity_score", {})
+                if isinstance(complexity, dict):
+                    complexity_sum += complexity.get("raw_score", 0)
+
+            count = len(all_agentic)
+            if count > 0:
+                console.kv("[3.2] complexity level", agentic_stats.get("complexity_level", 1), indent=1, width=24)
+                console.kv("[3.2] complexity score", "%.3f" % (complexity_sum / count), indent=1, width=24)
+                console.line("[3.6] phase breakdown", indent=1)
+                console.kv("planning", "%6.1f ms" % (total_plan / count), indent=2)
+                console.kv("execution", "%6.1f ms" % (total_exec / count), indent=2)
+                console.kv("synthesis", "%6.1f ms" % (total_syn / count), indent=2)
+                console.kv("total", "%6.1f ms" % ((total_plan + total_exec + total_syn) / count), indent=2)
+                console.line("workload characteristics", indent=1)
+                console.kv("llm calls", "%.1f" % (total_llm / count), indent=2)
+                console.kv("tool calls", "%.1f" % (total_tools / count), indent=2)
+                console.kv("steps", "%.1f" % (total_steps / count), indent=2)
+
+        console.line("")
+
+        # ====================================================================
+        # Create ML-ready dataset from all runs
+        # ====================================================================
+        ml_dataset = {"linear_runs": [], "agentic_runs": [], "all_runs": []}
+
+        for i, run in enumerate(all_linear):
+            if "ml_features" in run:
+                run["ml_features"]["run_number"] = i + 1
+                run["ml_features"]["experiment_id"] = run.get("experiment_id")
+                ml_dataset["linear_runs"].append(run["ml_features"])
+                ml_dataset["all_runs"].append(run["ml_features"])
+
+        for i, run in enumerate(all_agentic):
+            if "ml_features" in run:
+                run["ml_features"]["run_number"] = i + 1
+                run["ml_features"]["experiment_id"] = run.get("experiment_id")
+                ml_dataset["agentic_runs"].append(run["ml_features"])
+                ml_dataset["all_runs"].append(run["ml_features"])
+
+        # Add to results
+        results["ml_dataset"] = ml_dataset
+
+        # Optional: Save to CSV for immediate use
+        try:
+            import pandas as pd
+
+            df = pd.DataFrame(ml_dataset["all_runs"])
+            csv_path = f"data/ml_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            df.to_csv(csv_path, index=False)
+            progress.info(
+                "ml dataset saved  %s  (%d runs, %d features)",
+                csv_path, len(df), len(df.columns),
+            )
+        except ImportError:
+            logger.warning("pandas not installed; ml dataset not saved (pip install pandas)")
+        except Exception as e:
+            logger.warning("could not save ml dataset csv: %s", e)
+
+        if save_to_db:
+            experiment_meta = {
+                "name": f"{task_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                "description": f"Task: {task[:100]}",
+                "workflow_type": "comparison",
+                "model_name": linear_executor.config.get("model_id", "unknown"),
+                "provider": linear_executor.provider,
+                "task_name": task_id or "custom",
+                "country_code": country_code,
+            }
+            self.save_to_database(results, experiment_meta, hardware_info)
+
+        return results

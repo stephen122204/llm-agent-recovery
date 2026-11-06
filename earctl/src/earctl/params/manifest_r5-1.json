@@ -1,0 +1,23 @@
+{
+  "params_file": "controller_params_r5-1.json",
+  "params_sha256": "15732dd420360d7d6dc0efe3881611dd596734b558246f6b8a48a0c8fe9a2101",
+  "params_version": "r5-1",
+  "data_tag": "e1_e1b_e2",
+  "owner": "R5",
+  "model": "Qwen3-30B-A3B-Instruct-2507-FP8",
+  "serving": "vLLM",
+  "machine": "NVIDIA GB10 desktop system",
+  "engine": "engine D (letters as in the dataset provenance table)",
+  "task_family": "BFCL multi turn",
+  "failure_classes": [
+    "json_parse",
+    "rate_limit",
+    "silent_detected",
+    "timeout",
+    "tool_error"
+  ],
+  "energy_inputs": "calls_done, tokens_context (e2_g nonzero), tokens_cached",
+  "validity": "Calibrated for this model, machine and task family only; other setups need their own measured runs and fit.",
+  "params_sha256_study": "089fe00fa408270cb5be05200da3dec0975b31d13144937ef082db8a93611bcc",
+  "controller": "controller code as run in E3 (engine D)"
+}

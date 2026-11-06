@@ -1,0 +1,173 @@
+{
+ "ratio": 1.0491626904449718,
+ "RB_warm vs FR_warm | early tool | raw": [
+  2.9,
+  -9.7,
+  13.2
+ ],
+ "RB_warm vs FR_warm | early tool | cal": [
+  7.4,
+  -4.6,
+  17.3
+ ],
+ "RB_warm vs SR_warm | early tool | raw": [
+  22.5,
+  1.1,
+  42.6
+ ],
+ "RB_warm vs SR_warm | early tool | cal": [
+  26.1,
+  5.7,
+  45.2
+ ],
+ "RB_cold vs FR_warm | early tool | raw": [
+  -1.6,
+  -15.4,
+  9.6
+ ],
+ "RB_cold vs FR_warm | early tool | cal": [
+  3.1,
+  -10.0,
+  13.9
+ ],
+ "RB_cold vs SR_warm | early tool | raw": [
+  18.9,
+  -3.0,
+  39.6
+ ],
+ "RB_cold vs SR_warm | early tool | cal": [
+  22.7,
+  1.8,
+  42.4
+ ],
+ "RB_warm vs FR_warm | late tool | raw": [
+  20.2,
+  6.8,
+  31.2
+ ],
+ "RB_warm vs FR_warm | late tool | cal": [
+  23.9,
+  11.2,
+  34.4
+ ],
+ "RB_warm vs SR_warm | late tool | raw": [
+  3.6,
+  -21.0,
+  24.5
+ ],
+ "RB_warm vs SR_warm | late tool | cal": [
+  8.1,
+  -15.4,
+  28.0
+ ],
+ "RB_cold vs FR_warm | late tool | raw": [
+  21.3,
+  12.1,
+  30.7
+ ],
+ "RB_cold vs FR_warm | late tool | cal": [
+  25.0,
+  16.2,
+  33.9
+ ],
+ "RB_cold vs SR_warm | late tool | raw": [
+  5.0,
+  -13.7,
+  24.0
+ ],
+ "RB_cold vs SR_warm | late tool | cal": [
+  9.5,
+  -8.4,
+  27.6
+ ],
+ "RB_warm vs FR_warm | early model | raw": [
+  -7.5,
+  -33.4,
+  8.5
+ ],
+ "RB_warm vs FR_warm | early model | cal": [
+  -2.4,
+  -27.2,
+  12.8
+ ],
+ "RB_warm vs SR_warm | early model | raw": [
+  18.7,
+  -8.3,
+  37.4
+ ],
+ "RB_warm vs SR_warm | early model | cal": [
+  22.5,
+  -3.2,
+  40.3
+ ],
+ "RB_cold vs FR_warm | early model | raw": [
+  -22.9,
+  -66.7,
+  1.9
+ ],
+ "RB_cold vs FR_warm | early model | cal": [
+  -17.2,
+  -58.9,
+  6.5
+ ],
+ "RB_cold vs SR_warm | early model | raw": [
+  7.0,
+  -34.4,
+  31.7
+ ],
+ "RB_cold vs SR_warm | early model | cal": [
+  11.4,
+  -28.1,
+  34.9
+ ],
+ "RB_warm vs FR_warm | late model | raw": [
+  18.6,
+  2.0,
+  31.0
+ ],
+ "RB_warm vs FR_warm | late model | cal": [
+  22.4,
+  6.6,
+  34.2
+ ],
+ "RB_warm vs SR_warm | late model | raw": [
+  -17.6,
+  -33.9,
+  -7.6
+ ],
+ "RB_warm vs SR_warm | late model | cal": [
+  -12.1,
+  -27.6,
+  -2.6
+ ],
+ "RB_cold vs FR_warm | late model | raw": [
+  19.7,
+  7.3,
+  30.1
+ ],
+ "RB_cold vs FR_warm | late model | cal": [
+  23.4,
+  11.7,
+  33.4
+ ],
+ "RB_cold vs SR_warm | late model | raw": [
+  -16.0,
+  -20.6,
+  -12.1
+ ],
+ "RB_cold vs SR_warm | late model | cal": [
+  -10.6,
+  -14.9,
+  -6.9
+ ],
+ "best_of_six_calibrated": {
+  "json_parse|early": "FR_warm",
+  "json_parse|late": "SR_warm",
+  "rate_limit|early": "FR_warm",
+  "rate_limit|late": "SR_warm",
+  "tool_error|early": "RB_warm",
+  "tool_error|late": "RB_cold",
+  "timeout|early": "RB_warm",
+  "timeout|late": "RB_cold"
+ }
+}

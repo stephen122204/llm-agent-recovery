@@ -1,0 +1,101 @@
+{
+  "note": "Vendored files are copies of the study's code: engine D (the controller state E3 ran) and the EAR version (ear.py, token_rule.py). sha256 is of the file shipped here, sha256_study of the file as run or as fitted.",
+  "repository": "anonymized repository",
+  "files": {
+    "base.py": {
+      "version": "engine D",
+      "path": "plugin/decider/base.py",
+      "owner": "R6",
+      "sha256": "e1e56174c49a7ee5ef1f2b1db8135bb6a5677e0cb21df9a8293a70ef5a42e251",
+      "sha256_study": "e1e56174c49a7ee5ef1f2b1db8135bb6a5677e0cb21df9a8293a70ef5a42e251",
+      "identical_to_study": true
+    },
+    "beta_p.py": {
+      "version": "engine D",
+      "path": "plugin/decider/beta_p.py",
+      "owner": "R6",
+      "sha256": "f8f4185163d289721429aaf2c51f643443a060a64c32f9884a0dd537edd41ba0",
+      "sha256_study": "f8f4185163d289721429aaf2c51f643443a060a64c32f9884a0dd537edd41ba0",
+      "identical_to_study": true
+    },
+    "predict.py": {
+      "version": "engine D",
+      "path": "plugin/decider/predict.py",
+      "owner": "R5",
+      "sha256": "62538804f84bfc7889ab343448fc702779453c0a9a771d3c265ac126a030f60a",
+      "sha256_study": "62538804f84bfc7889ab343448fc702779453c0a9a771d3c265ac126a030f60a",
+      "identical_to_study": true,
+      "also_seen": {
+        "version": "later controller version",
+        "sha256": "ae96b90774c7bcfe8c490cf402fc223a15cb786b72e3b0ab6674f0545a31cc1b",
+        "difference": "adds predict_uncached_tokens only; predict_energy and decide identical. E3 ran engine D, so that copy is vendored."
+      }
+    },
+    "raf_history.py": {
+      "version": "engine D",
+      "path": "core/execution/raf_history.py",
+      "owner": "R6",
+      "sha256": "863d573e1b08c710bb6265987a4f5d93ff84a66dfcc58d0b738c91a0e8fd1268",
+      "sha256_study": "8ffc507030bfa7db09bf4583f6c24c1cff080c6ead4b47ddd7ea721af4e22841",
+      "identical_to_study": false,
+      "used": "count_key and _credit (counting rule) only; the store functions are never called",
+      "difference": "one string constant anonymized (ANNOTATION_SOURCE); no code change"
+    },
+    "ear.py": {
+      "version": "EAR version",
+      "path": "plugin/decider/ear.py",
+      "owner": "R2",
+      "sha256": "c7278d54785d51dc1c1a799c2ece3095cf21974b42e8b9b1481210cfa465f454",
+      "sha256_study": "d5f190144e3fb74f6bf602e24f6ba87dbf72e187ff235d933dc01cd4a33c6b7a",
+      "identical_to_study": false,
+      "used": "load_selector, features, probability, Ear.mean_decision; the in goal wrapper needs a live run and is never called",
+      "difference": "two environment variable names and one docstring line anonymized; no logic change"
+    },
+    "token_rule.py": {
+      "version": "EAR version",
+      "path": "plugin/decider/token_rule.py",
+      "owner": "R6",
+      "sha256": "2535bcb9c93666574fa8db8349c6e98a97281c27e3b76905f0a6e33abe6a3e32",
+      "sha256_study": "04a0ebed3596eb3857510124cb73e822005fd9daf04e1d0189f980cb981ec71a",
+      "identical_to_study": false,
+      "used": "TokenRule.choose; predict.py has no predict_uncached_tokens, so tok_a + tok_b x calls_done (as in E3)",
+      "difference": "one docstring line anonymized; no code change",
+      "also_seen": "identical at engine D (E3)"
+    }
+  },
+  "stubs": {
+    "note": "Written for earctl, not vendored: they replace platform modules the vendored files import.",
+    "adapter.py": "_load_beta only: BetaP from EAR_PARAMS or the shipped params v2; no learned estimator, no fail closed wrapper",
+    "state.py": "build_state raises: it needs a live agent run"
+  },
+  "params": {
+    "controller_params_r5-1.json": {
+      "source": "experiment folder (anonymized)",
+      "owner": "R5",
+      "sha256": "15732dd420360d7d6dc0efe3881611dd596734b558246f6b8a48a0c8fe9a2101",
+      "sha256_study": "089fe00fa408270cb5be05200da3dec0975b31d13144937ef082db8a93611bcc",
+      "params_version": "r5-1",
+      "data_tag": "e1_e1b_e2",
+      "copied": "2026-10-17T15:21",
+      "use": "E3 parity replay only",
+      "difference": "ledger file paths shortened to data/<name>; every parameter value identical"
+    },
+    "controller_params_v2.json": {
+      "source": "experiment folder (anonymized)",
+      "owner": "R5",
+      "sha256": "08efb78c12aec86ea9062e1d3ee710c6205de9481009b1792dd8d7415ee8911f",
+      "sha256_study": "97ecd54a677f55d06967678fe6def2f318524c4713f97a0b9592de445a97076b",
+      "params_version": "v2",
+      "data_tag": "sel_v2",
+      "use": "default (EAR)",
+      "difference": "ledger file paths shortened to data/<name>; every parameter value identical"
+    },
+    "selector_lr_v2.json": {
+      "source": "experiment folder (anonymized)",
+      "owner": "R5",
+      "sha256": "179b83863744f584ec6bf4d28153b1ecb85c05bb985d672e81aeabb44507bbc3",
+      "sha256_study": "179b83863744f584ec6bf4d28153b1ecb85c05bb985d672e81aeabb44507bbc3",
+      "use": "default (EAR)"
+    }
+  }
+}

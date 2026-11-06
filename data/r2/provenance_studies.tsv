@@ -1,0 +1,12 @@
+study	engine	model	precision	vllm_and_key_serve_flags	temperature_and_model_seed
+E1	A (2 replacement goals on C)	Qwen3 30B A3B Instruct 2507 (MoE, about 3B active)	FP8 weights (official FP8 release)	v0.23.0; tool parser hermes; common flags	0, seed 0
+E1b	B	Qwen3 30B A3B Instruct 2507	FP8	same as E1	0, seed 0
+E2	C	Qwen3 30B A3B Instruct 2507	FP8	same as E1	0, seed 0
+E2b r2	D	Qwen3 30B A3B Instruct 2507	FP8	same as E1	0, seed 0
+E3	D	Qwen3 30B A3B Instruct 2507	FP8	same as E1	0, seed 0
+raf_mid	E	Qwen3 30B A3B Instruct 2507	FP8	same as E1	0, seed 0
+raf_m3	E	Mistral Small 3.2 24B Instruct 2506 (dense)	bf16 weights quantized to FP8 at load	v0.23.0; tool parser mistral; Mistral tokenizer, config and load format; image input off; common flags	0, seed 0
+raf_m4	F	gpt-oss 20B (MoE, about 21B total, about 3.6B active)	MXFP4 (native release)	v0.23.0; tool parser openai; tokenizer vocab files served locally; common flags	0, seed 0
+raf_samp	G	Qwen3 30B A3B Instruct 2507	FP8	same as E1	0.7, seeds 1, 2, 3 (one per run)
+GB10 sweep, Qwen	G	Qwen3 30B A3B Instruct 2507	FP8	same as E1	0, seed 0; 64 output tokens fixed (ignore_eos)
+GB10 sweep, gpt-oss	G	gpt-oss 20B	MXFP4	same as raf_m4	0, seed 0; 64 output tokens fixed (ignore_eos)

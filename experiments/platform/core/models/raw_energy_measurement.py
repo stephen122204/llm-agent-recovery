@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+RAW ENERGY MEASUREMENT – Layer 1: Ground Truth
+================================================================================
+
+This class represents pure raw measurement data from hardware counters.
+NEVER modified after creation. Contains only raw readings, no corrections.
+
+Author: Deepak Panigrahy
+================================================================================
+"""
+
+import json
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from core.models.normalized_energy_reading import NormalizedEnergyReading
+
+
+@dataclass
+class RawEnergyMeasurement:
+    """
+    Layer 1 – Raw measurement data. NEVER modified.
+
+    This is your primary evidence. All fields are stored as read from hardware.
+    No baseline correction, no derived values – just raw truth.
+
+    Attributes:
+        measurement_id: Unique identifier for this measurement
+        start_time: Unix timestamp when measurement started
+        end_time: Unix timestamp when measurement ended
+        duration_seconds: Total duration in seconds
+
+        rapl_start_uj: Raw RAPL readings at start (microjoules)
+        rapl_end_uj: Raw RAPL readings at end (microjoules)
+
+        perf: Performance counter readings (PerformanceCounters object)
+        turbostat: Turbostat continuous monitoring data (dictionary with dataframe, summary)
+        thermal: Temperature readings
+        power_state: CPU power state data
+        scheduler_metrics: Scheduler metrics with deltas
+
+        samples: List of high-frequency samples (timestamp, energy)
+        sampling_rate_hz: Actual sampling rate achieved
+
+        metadata: Additional context (hostname, kernel, cpu_affinity, etc.)
+    """
+
+    # Metadata
+    measurement_id: str
+    start_time: float
+    end_time: float
+    duration_seconds: float
+
+    # Energy snapshots at start/end of measurement window.
+    # NormalizedEnergyReading replaces raw Dict - platform-agnostic typed fields.
+    rapl_start_uj: Dict[str, int]   # kept for backward compat - use energy_start
+    rapl_end_uj: Dict[str, int]     # kept for backward compat - use energy_end
+
+    # Other hardware readings
+    perf: Any  # PerformanceCounters object
+    energy_start: "Optional[NormalizedEnergyReading]" = None
+    energy_end:   "Optional[NormalizedEnergyReading]" = None
+    turbostat: Dict[str, Any] = field(default_factory=dict)  # ADD THIS LINE
+    thermal: Dict[str, Any] = field(default_factory=dict)
+    power_state: Dict[str, Any] = field(default_factory=dict)
+    ##to capture schedular swap memory start and end snapshot
+    scheduler_start: Optional[Dict] = None
+    scheduler_end: Optional[Dict] = None
+    scheduler_metrics: Dict[str, Any] = field(default_factory=dict)
+    msr_metrics: Dict[str, Any] = field(default_factory=dict)
+    # ====================================================================
+    # NEW: Thermal derived fields (from EnergyEngine calculations)
+    # ====================================================================
+
+    thermal_during_experiment: Optional[int] = (
+        None  # 1 if throttling occurred during experiment
+    )
+    thermal_now_active: Optional[int] = None  # 1 if throttling active at end
+    thermal_since_boot: Optional[int] = (
+        None  # 1 if system has ever throttled since boot
+    )
+    # GPU PP1 energy via MSR 0x641 (Intel Tiger Lake only)
+    # Populated by EnergyEngine.stop_measurement() on UBUNTU2505, None elsewhere
+    gpu_total_uj: Optional[int] = None  # raw MSR delta * 61.0352 µJ over full run
+    gpu_dynamic_local_uj:    Optional[int]   = None  # run-local adaptive dynamic energy, primary method
+    cpu_dynamic_local_uj:    Optional[int]   = None  # run-local adaptive CPU/pkg dynamic energy, primary method
+    cpu_idle_power_w_local:  Optional[float] = None  # median idle power from this run's own CPU power samples
+    gpu_idle_power_w_local:  Optional[float] = None  # median idle power from this run's own idle samples
+    uncore_unavailable: bool = False  # True on readers with no real core+uncore+dram=package model (SPBM/Grace, future AMD/Apple)
+    # Sampling data
+    samples: List[tuple] = field(default_factory=list)
+    io_samples:        list        = field(default_factory=list)  # Chunk 12
+    sampling_rate_hz: float = 0.0
+
+    # Thermal samples (1Hz)
+    thermal_samples: List[Tuple[float, Dict, bool]] = field(default_factory=list)
+
+    # Additional context
+    # Additional context
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Chunk 9: provenance buffer — staged capture entries before run_id known.
+    # Flushed to DB by experiment_runner after insert_run() returns real run_id.
+    # Never serialised — runtime only, not stored in to_dict() or to_json().
+    _provenance_buffer: List[Dict] = field(default_factory=list, repr=False)
+
+    def __post_init__(self):
+        """Validate raw data (but NEVER modify it)."""
+        if self.duration_seconds <= 0:
+            raise ValueError(f"Duration must be positive: {self.duration_seconds}")
+        # ========== ADD THESE LINES ==========
+        if hasattr(self, "msr_metrics") and self.msr_metrics:
+            import logging as _logging  # built inside stop_measurement: debug only, gate held
+            _logging.getLogger(__name__).debug(
+                "raw msr metrics c2 %.3f s, keys %s",
+                self.msr_metrics.get("c2_time_seconds", 0), list(self.msr_metrics.keys()),
+            )
+        # =====================================
+
+    @property
+    def package_energy_uj(self) -> int:
+        """Compute raw package energy delta in microjoules.
+        Supports RAPL key 'package-0' (x86), SPBM key 'pkg' (GN100 aarch64),
+        and IOKit key 'cpu' (Apple Silicon unified CPU rail).
+        """
+        # Use NormalizedEnergyReading if available (Phase 2 path)
+        if self.energy_start is not None and self.energy_end is not None:
+            if self.energy_start.pkg_uj is not None and self.energy_end.pkg_uj is not None:
+                return max(0, self.energy_end.pkg_uj - self.energy_start.pkg_uj)
+        # Fallback: legacy raw dict path (Phase 1 backward compat)
+        start = self.rapl_start_uj.get("package-0",
+                self.rapl_start_uj.get("pkg",
+                self.rapl_start_uj.get("cpu", 0)))
+        end   = self.rapl_end_uj.get("package-0",
+                self.rapl_end_uj.get("pkg",
+                self.rapl_end_uj.get("cpu", 0)))
+        return max(0, end - start)
+
+    @property
+    def core_energy_uj(self) -> int:
+        """Compute raw core energy delta in microjoules.
+        Supports RAPL key 'core' (x86), SPBM key 'cpu_p' (GN100 P-cores),
+        and IOKit key 'cpu' (Apple Silicon — same rail as package, no sub-domain).
+        """
+        # Use NormalizedEnergyReading if available (Phase 2 path)
+        if self.energy_start is not None and self.energy_end is not None:
+            if self.energy_start.cpu_uj is not None and self.energy_end.cpu_uj is not None:
+                return max(0, self.energy_end.cpu_uj - self.energy_start.cpu_uj)
+        # Fallback: legacy raw dict path (Phase 1 backward compat)
+        start = self.rapl_start_uj.get("core",
+                self.rapl_start_uj.get("cpu_p",
+                self.rapl_start_uj.get("cpu", 0)))
+        end   = self.rapl_end_uj.get("core",
+                self.rapl_end_uj.get("cpu_p",
+                self.rapl_end_uj.get("cpu", 0)))
+        return max(0, end - start)
+    @property
+    
+    def dram_energy_uj(self) -> Optional[int]:
+        """Compute raw DRAM energy delta if available.
+        Returns None on GN100 — Grace has no DRAM RAPL domain (MIC-1).
+        """
+        if "dram" in self.rapl_start_uj and "dram" in self.rapl_end_uj:
+            start = self.rapl_start_uj["dram"]
+            end   = self.rapl_end_uj["dram"]
+            return max(0, end - start)
+        return None   # NULL correct for GN100 — never 0
+
+    @property
+    def package_energy_j(self) -> float:
+        """Package energy in joules (for convenience)."""
+        return self.package_energy_uj / 1_000_000
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "measurement_id": self.measurement_id,
+            "timing": {
+                "start": self.start_time,
+                "end": self.end_time,
+                "duration_seconds": self.duration_seconds,
+                "start_iso": datetime.fromtimestamp(self.start_time).isoformat(),
+                "end_iso": datetime.fromtimestamp(self.end_time).isoformat(),
+            },
+            "rapl_start_uj": self.rapl_start_uj,
+            "rapl_end_uj": self.rapl_end_uj,
+            "perf": self.perf.to_dict() if hasattr(self.perf, "to_dict") else self.perf,
+            "turbostat": self.turbostat,  # ADD THIS LINE
+            "thermal": self.thermal,
+            "power_state": self.power_state,
+            "scheduler_metrics": self.scheduler_metrics,
+            "msr_metrics": self.msr_metrics,
+            # NEW: Thermal derived fields
+            "thermal_during_experiment": self.thermal_during_experiment,
+            "thermal_now_active": self.thermal_now_active,
+            "thermal_since_boot": self.thermal_since_boot,
+            "samples": self.samples,
+            "sampling_rate_hz": self.sampling_rate_hz,
+            "metadata": self.metadata,
+            "derived": {
+                "package_energy_uj": self.package_energy_uj,
+                "core_energy_uj": self.core_energy_uj,
+                "dram_energy_uj": self.dram_energy_uj,
+                "package_energy_j": self.package_energy_j,
+            },
+        }
+
+    def to_json(self) -> str:
+        """Serialize to JSON for permanent storage."""
+        return json.dumps(self.to_dict(), indent=2, default=str)

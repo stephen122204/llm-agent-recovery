@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alems-sdk"
+version = "1.0.0"
+description = "A-LEMS SDK: stable facade and conformance kits for plugin authors"
+requires-python = ">=3.9"
+dependencies = ["packaging>=21"]
+
+[project.optional-dependencies]
+# Serving adapter helpers probe HTTP endpoints (alems_sdk.serving.discovery).
+serving = ["requests>=2.31.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+[project.entry-points."alems.conformance.kits"]
+measurement = "alems_sdk._kit_measurement:MeasurementKit"
+execution   = "alems_sdk._kit_execution:ExecutionKit"
+persistence = "alems_sdk._kit_persistence:PersistenceKit"
+output      = "alems_sdk._kit_persistence:OutputKit"

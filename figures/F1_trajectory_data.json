@@ -1,0 +1,23 @@
+{
+ "task": "multi_turn_base_71",
+ "cls": "timeout",
+ "point": "late",
+ "rows": {
+  "FR_warm": {
+   "goal_id": 1295,
+   "attempt2_board_j": 797.6639999999999,
+   "attempt2_uncached_tokens": 501.0,
+   "ok": 1,
+   "total_board_j": 1421.2049999999997
+  },
+  "SR_warm": {
+   "goal_id": 1297,
+   "attempt2_board_j": 254.03600000000003,
+   "attempt2_uncached_tokens": 261.0,
+   "ok": 1,
+   "total_board_j": 873.7450000000002
+  }
+ },
+ "per_call_energy": "attempt energy split evenly over calls (no sample timestamps)",
+ "demo": false
+}

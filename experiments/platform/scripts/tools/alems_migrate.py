@@ -1,0 +1,1345 @@
+#!/usr/bin/env python3
+"""
+A-LEMS Migration Runner
+
+Implements SPEC_MIGRATION_SYSTEM.md Chunks M1 (runner core) and M2 (safety
+gates). SQLite only, set based version tracking, checksum enforced.
+
+Entry point convention matches scripts/tools/path_loader.py.
+Usage:
+    python3 scripts/tools/alems_migrate.py              # apply pending
+    python3 scripts/tools/alems_migrate.py --check       # manifest check
+    python3 scripts/tools/alems_migrate.py --verify      # checksum only
+    python3 scripts/tools/alems_migrate.py --status      # print history
+    python3 scripts/tools/alems_migrate.py --plan        # dry run
+    python3 scripts/tools/alems_migrate.py --adopt       # one time adoption
+"""
+
+import argparse
+import hashlib
+import json
+import socket
+import sqlite3
+import subprocess
+import sys
+import os
+import time
+from pathlib import Path
+
+TOOL_VERSION = "alems-migrate-1.0"
+
+# scripts/tools/alems_migrate.py -> repo root is two parents up
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MIGRATIONS_DIR = REPO_ROOT / "migrations"
+SCHEMA_DIR = MIGRATIONS_DIR / "schema"
+SEED_DIR = MIGRATIONS_DIR / "seed"
+EXTENSIONS_DIR = MIGRATIONS_DIR / "extensions"
+MANIFEST_PATH = MIGRATIONS_DIR / "migration_manifest.json"
+MACHINE_SETUP_ROOT = REPO_ROOT / "scripts" / "machine_setup"
+ALEMSRC_PATH = Path.home() / ".alemsrc"
+
+
+class MigrationError(Exception):
+    """Raised for any block condition. main() catches this, prints to
+    stderr, and exits 1. Every message includes the fix command per
+    spec Section 9, so this is the only error type the CLI surfaces."""
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Identity and provenance
+# ---------------------------------------------------------------------------
+
+def get_hostname() -> str:
+    return socket.gethostname()
+
+
+def get_machine_id():
+    """Reads machine_id from ~/.alemsrc. Returns None gracefully if the
+    file or key is absent, supporting early adoption before every machine
+    has run setup_new_machine.sh (spec Section 4.3)."""
+    if not ALEMSRC_PATH.exists():
+        return None
+    for line in ALEMSRC_PATH.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("machine_id"):
+            parts = line.replace(":", "=").split("=", 1)
+            if len(parts) == 2:
+                return parts[1].strip().strip('"').strip("'")
+    return None
+
+
+def get_repo_commit():
+    """git rev-parse HEAD for reproducibility provenance. Returns None on
+    failure rather than raising, a missing commit hash should never block
+    a migration, only be absent from the record (MSC-2 allows NULL)."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, stderr=subprocess.DEVNULL
+        )
+        return out.decode().strip()
+    except Exception:
+        return None
+
+
+def sha256_file(filepath: Path) -> str:
+    h = hashlib.sha256()
+    h.update(filepath.read_bytes())
+    return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# File discovery
+# ---------------------------------------------------------------------------
+
+def parse_version(filename: str, prefix: str):
+    """Parses the integer version from the filename prefix only (spec
+    Section 3). v061_add_nvlink_columns.sql with prefix 'v' returns 61.
+    Returns None for non matching files so stray files (README, .gitkeep)
+    are skipped instead of crashing the scan."""
+    if not filename.endswith(".sql"):
+        return None
+    if not filename.startswith(prefix):
+        return None
+    digits = ""
+    for ch in filename[len(prefix):]:
+        if ch.isdigit():
+            digits += ch
+        else:
+            break
+    if not digits:
+        return None
+    return int(digits)
+
+
+def discover_repo_files(directory: Path, prefix: str):
+    """Scans one migrations subdirectory, returns {version: filepath}.
+    Only called by alems migrate itself, the startup check in Section 7
+    must never directory scan."""
+    result = {}
+    if not directory.exists():
+        return result
+    for entry in sorted(directory.iterdir()):
+        if not entry.is_file():
+            continue
+        version = parse_version(entry.name, prefix)
+        if version is None:
+            continue
+        result[version] = entry
+    return result
+
+
+def discover_machine_setup_files(hostname: str):
+    """Machine setup scripts use free naming (spec Section 3) and are
+    tracked by filename, not version, since machine_setup_history has
+    UNIQUE(filename) rather than UNIQUE(version, type)."""
+    host_dir = MACHINE_SETUP_ROOT / hostname
+    if not host_dir.exists():
+        return []
+    return sorted(p for p in host_dir.iterdir() if p.is_file() and p.suffix == ".sql")
+
+
+# ---------------------------------------------------------------------------
+# Table bootstrap
+# ---------------------------------------------------------------------------
+
+def ensure_tables(conn: sqlite3.Connection) -> None:
+    """Creates migration_history and machine_setup_history if absent.
+    Runs outside the per migration transaction model because these two
+    tables are the ground truth every later comparison depends on."""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS migration_history (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        version          INTEGER NOT NULL,
+        type             TEXT NOT NULL CHECK(type IN ('schema', 'seed')),
+        filename         TEXT NOT NULL,
+        checksum_sha256  TEXT NOT NULL,
+        applied_at       TEXT NOT NULL DEFAULT (datetime('now')),
+        tool_version     TEXT NOT NULL,
+        duration_ms      INTEGER NOT NULL,
+        status           TEXT NOT NULL CHECK(status IN ('pending', 'running', 'applied', 'failed')),
+        hostname         TEXT NOT NULL,
+        machine_id       TEXT,
+        repo_commit      TEXT,
+        original_checksum TEXT,
+        healed_at        TEXT,
+        source           TEXT DEFAULT 'core',
+        UNIQUE(version, type, source)
+    );
+    CREATE TABLE IF NOT EXISTS machine_setup_history (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        filename        TEXT NOT NULL,
+        checksum_sha256 TEXT NOT NULL,
+        applied_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        tool_version    TEXT NOT NULL,
+        duration_ms     INTEGER NOT NULL,
+        status          TEXT NOT NULL CHECK(status IN ('pending', 'running', 'applied', 'failed')),
+        hostname        TEXT NOT NULL,
+        machine_id      TEXT,
+        repo_commit     TEXT,
+        UNIQUE(filename)
+    );
+    """)
+    conn.commit()
+    # Bootstrap healing columns on existing DBs that predate this feature.
+    # Idempotent — ALTER TABLE ADD COLUMN is a no-op if column exists in SQLite.
+    for col in ("original_checksum", "healed_at"):
+        try:
+            conn.execute(f"ALTER TABLE migration_history ADD COLUMN {col} TEXT")
+            conn.commit()
+        except Exception:
+            pass  # column already exists
+
+
+# ---------------------------------------------------------------------------
+# State queries. Set based only, MAX(version) never appears (Design
+# Principle 7).
+#
+# CORE_SOURCE-scoped by construction (found 2026-09-15, shipping
+# tool_selection alongside output_quality): applied_versions(),
+# running_versions(), and applied_checksums() are core migration
+# lifecycle functions ONLY. Confirmed by repo-wide grep — every one of
+# their 9 call sites lives in this file, all in core migration code
+# paths (preflight, generate_manifest, cmd_adopt). No extension
+# migration path has ever called these; _get_pending_extension_migrations()
+# uses its own direct (source, filename) query instead. Hardcoded here
+# rather than genericized with a source parameter, specifically so a
+# future reader seeing "WHERE type = ?" does not assume this is generic
+# across namespaces and start reusing it for extension state — the
+# exact class of mistake that produced the original 90000+version
+# collision bug. See MIGRATION_HISTORY_SOURCE_SCOPED_UNIQUENESS.md.
+# ---------------------------------------------------------------------------
+
+CORE_SOURCE = "core"
+
+
+def applied_versions(conn: sqlite3.Connection, mtype: str):
+    """Return applied migration versions for CORE migrations only.
+    Never returns extension rows regardless of their type value."""
+    rows = conn.execute(
+        "SELECT version FROM migration_history WHERE type=? AND source=? AND status='applied'",
+        [mtype, CORE_SOURCE],
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def running_versions(conn: sqlite3.Connection, mtype: str):
+    """Return running migration versions for CORE migrations only."""
+    rows = conn.execute(
+        "SELECT version FROM migration_history WHERE type=? AND source=? AND status='running'",
+        [mtype, CORE_SOURCE],
+    ).fetchall()
+    return {r[0] for r in rows}
+
+def applied_checksums(conn: sqlite3.Connection, mtype: str):
+    """Returns {version: (filename, checksum)} for every applied CORE
+    migration record only — see the CORE_SOURCE note above applied_versions()."""
+    rows = conn.execute(
+        "SELECT version, filename, checksum_sha256 FROM migration_history "
+        "WHERE type=? AND source=? AND status='applied'",
+        [mtype, CORE_SOURCE],
+    ).fetchall()
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def applied_setup_filenames(conn: sqlite3.Connection):
+    rows = conn.execute(
+        "SELECT filename, checksum_sha256 FROM machine_setup_history WHERE status='applied'"
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Safety gates, Chunk M2
+# ---------------------------------------------------------------------------
+
+def verify_checksums(conn: sqlite3.Connection, mtype: str, repo_files: dict,
+                     env_mode: str = "prod"):
+    """Recomputes SHA256 for every applied migration's on disk file and
+    compares to the stored hash. A mismatch means the file changed after
+    being applied somewhere, the exact silent divergence scenario this
+    gate exists to catch.
+
+    prod mode: returns formatted error strings (caller raises FATAL).
+    dev mode:  heals the checksum in migration_history and warns, never
+               re-executes the migration (schema change already applied).
+    Returns formatted strings, empty list means clean."""
+    problems = []
+    for version, (filename, stored_hash) in applied_checksums(conn, mtype).items():
+        filepath = repo_files.get(version)
+        if filepath is None:
+            problems.append(
+                f"Applied {mtype} version {version} ({filename}) is missing from disk."
+            )
+            continue
+        current_hash = sha256_file(filepath)
+        if current_hash != stored_hash:
+            if env_mode == "dev":
+                # Dev mode: heal checksum, warn, do not re-execute
+                print(
+                    f"  WARNING (dev): checksum mismatch on {filename}\n"
+                    f"    Stored: {stored_hash[:16]}... → Current: {current_hash[:16]}...\n"
+                    f"    Healing checksum. Migration will NOT be re-executed."
+                )
+                conn.execute(
+                    "UPDATE migration_history SET "
+                    "checksum_sha256=?, original_checksum=?, healed_at=datetime('now') "
+                    "WHERE version=? AND type=?",
+                    (current_hash, stored_hash, version, mtype)
+                )
+                conn.commit()
+            else:
+                problems.append(
+                    f"Checksum mismatch: {filepath.relative_to(REPO_ROOT)}\n"
+                    f"  Applied:  sha256:{stored_hash}\n"
+                    f"  Current:  sha256:{current_hash}"
+                )
+    return problems
+
+
+def check_gaps_and_extras(applied: set, repo: set):
+    """Full set comparison. A machine with applied {1,2,4} and repo
+    {1,2,3,4,5} has a true gap at 3 even though MAX(applied)=4 looks
+    almost current. gaps = repo versions missing from applied, below the
+    highest applied version. extra = applied versions absent from repo,
+    meaning wrong branch or stale data."""
+    missing = repo - applied
+    gaps = set()
+    if applied and missing:
+        # Exclude sentinel version 9000 from max calculation.
+        # v9000 is a baseline adoption marker, not a sequential migration.
+        # Including it in max() causes every real migration (82, 83...)
+        # to be flagged as a gap permanently.
+        real_applied = {v for v in applied if v < 9000}
+        max_applied = max(real_applied) if real_applied else 0
+        gaps = {v for v in missing if v < max_applied}
+    extra = applied - repo
+    return gaps, extra
+
+
+# ---------------------------------------------------------------------------
+# Migration application, Chunk M1 core
+# ---------------------------------------------------------------------------
+
+def _split_sql_statements(script: str) -> list:
+    """
+    Split a multi-statement SQL script into individual statements, so
+    each can be run via conn.execute() inside a real transaction.
+
+    Root cause this exists to fix: sqlite3.Connection.executescript()
+    unconditionally issues an implicit COMMIT before running, and does
+    not wrap its own statements in a transaction either — Python's own
+    docs confirm this. That means a BEGIN IMMEDIATE issued just before
+    executescript() is silently committed away before a single statement
+    of the migration runs, so a mid-script failure leaves whatever ran
+    so far permanently applied instead of rolling back. Found 2026-09-16
+    applying v094: a failed statement partway through left temp tables
+    and a dropped table behind despite the surrounding rollback logic.
+
+    Respects semicolons inside single-quoted strings, double-quoted
+    identifiers, and -- line comments, so a semicolon in a string
+    literal or a comment does not cause an incorrect split.
+    """
+    statements = []
+    current = []
+    in_single_quote = False
+    in_double_quote = False
+    in_line_comment = False
+    i = 0
+    length = len(script)
+    while i < length:
+        ch = script[i]
+        nxt = script[i + 1] if i + 1 < length else ""
+
+        if in_line_comment:
+            current.append(ch)
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if in_single_quote:
+            current.append(ch)
+            if ch == "'" and nxt == "'":
+                current.append(nxt)
+                i += 2
+                continue
+            if ch == "'":
+                in_single_quote = False
+            i += 1
+            continue
+
+        if in_double_quote:
+            current.append(ch)
+            if ch == '"':
+                in_double_quote = False
+            i += 1
+            continue
+
+        if ch == "-" and nxt == "-":
+            in_line_comment = True
+            current.append(ch)
+            i += 1
+            continue
+
+        if ch == "'":
+            in_single_quote = True
+            current.append(ch)
+            i += 1
+            continue
+
+        if ch == '"':
+            in_double_quote = True
+            current.append(ch)
+            i += 1
+            continue
+
+        if ch == ";":
+            stmt = "".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    tail = "".join(current).strip()
+    if tail:
+        statements.append(tail)
+
+    return statements
+
+
+def apply_one(conn, filepath: Path, version: int, mtype: str,
+              hostname: str, machine_id, commit):
+    """Applies one schema or seed migration inside one BEGIN IMMEDIATE
+    transaction (Design Principle 9). BEGIN IMMEDIATE also serves as the
+    cross process migration lock, a second concurrent run blocks here
+    until this one commits or rolls back."""
+    checksum = sha256_file(filepath)
+    cur = conn.cursor()
+    # Upsert, not blind insert. A prior attempt at this exact
+    # (version, type, source) may have left a 'failed' or a crashed
+    # 'running' row occupying the UNIQUE slot — that row must never
+    # block a retry. source is CORE_SOURCE here always: apply_one() is
+    # the core migration path only (extension migrations go through
+    # _apply_extension_migration(), which has its own upsert following
+    # this exact same pattern). Explicit rather than relying on the
+    # column's DEFAULT, per this file's "be explicit, don't lean on
+    # defaults for correctness-critical identity" convention — see
+    # MIGRATION_HISTORY_SOURCE_SCOPED_UNIQUENESS.md.
+    # Self-bootstrapping fallback (found 2026-09-15 applying v093 on
+    # gn100): v093 is the migration that CREATES the (version, type,
+    # source) constraint — but apply_one() must insert v093's own
+    # bookkeeping row BEFORE v093's SQL has run, meaning the OLD
+    # (version, type) constraint is still live at that exact moment.
+    # Try the new conflict target first (correct for every machine
+    # once past v093); fall back to the old one only on the specific
+    # "constraint doesn't exist yet" error, which self-resolves the
+    # instant this same call's migration SQL (v093 itself) commits.
+    # This makes every one of the 7 fleet machines bootstrap through
+    # v093 identically via a plain 'alems dev sync', no manual
+    # multi-step deploy required anywhere.
+    try:
+        cur.execute(
+            "INSERT INTO migration_history "
+            "(version, type, filename, checksum_sha256, tool_version, duration_ms, "
+            " status, hostname, machine_id, repo_commit, source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(version, type, source) DO UPDATE SET "
+            "  filename=excluded.filename, "
+            "  checksum_sha256=excluded.checksum_sha256, "
+            "  applied_at=datetime('now'), "
+            "  tool_version=excluded.tool_version, "
+            "  duration_ms=excluded.duration_ms, "
+            "  status=excluded.status, "
+            "  hostname=excluded.hostname, "
+            "  machine_id=excluded.machine_id, "
+            "  repo_commit=excluded.repo_commit",
+            [version, mtype, filepath.name, checksum, TOOL_VERSION, 0,
+             "running", hostname, machine_id, commit, CORE_SOURCE],
+        )
+    except sqlite3.OperationalError as exc:
+        if "ON CONFLICT clause does not match" not in str(exc):
+            raise
+        print(
+            "apply_one: pre-v093 database, falling back to legacy "
+            "(version, type) conflict target for this call"
+        )
+        cur.execute(
+            "INSERT INTO migration_history "
+            "(version, type, filename, checksum_sha256, tool_version, duration_ms, "
+            " status, hostname, machine_id, repo_commit, source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(version, type) DO UPDATE SET "
+            "  filename=excluded.filename, "
+            "  checksum_sha256=excluded.checksum_sha256, "
+            "  applied_at=datetime('now'), "
+            "  tool_version=excluded.tool_version, "
+            "  duration_ms=excluded.duration_ms, "
+            "  status=excluded.status, "
+            "  hostname=excluded.hostname, "
+            "  machine_id=excluded.machine_id, "
+            "  repo_commit=excluded.repo_commit",
+            [version, mtype, filepath.name, checksum, TOOL_VERSION, 0,
+             "running", hostname, machine_id, commit, CORE_SOURCE],
+        )
+    conn.commit()    # cur.lastrowid is unreliable across the INSERT vs UPDATE path of an
+    # upsert on some SQLite versions — look the row up explicitly instead.
+    record_id = conn.execute(
+        "SELECT id FROM migration_history WHERE version=? AND type=? AND source=?",
+        (version, mtype, CORE_SOURCE),
+    ).fetchone()[0]
+
+    start = time.monotonic_ns()
+    try:
+        # SQLite's ALTER TABLE RENAME triggers a full schema-wide view
+        # revalidation by default, not just views referencing the
+        # renamed table. v090 renames output_quality and has nothing to
+        # do with v_energy, but a stale v_energy (fixed separately —
+        # see v092) still fails the whole RENAME. legacy_alter_table
+        # disables that revalidation, matching pre-3.25 SQLite RENAME
+        # behavior. Confirmed safe here: no live view or trigger
+        # references output_quality by name on any current database
+        # (checked during 35G fleet rollout, 2026-09) — the only such
+        # reference lives in migrations/deprecated/legacy/030_chunk8_views.sql,
+        # which alems_migrate.py never discovers or applies. If a future
+        # migration adds a view/trigger that references a table being
+        # renamed in the SAME migration, that migration must recreate
+        # it explicitly afterward, since legacy_alter_table means SQLite
+        # will not do it automatically.
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        conn.execute("BEGIN IMMEDIATE")
+        # Do NOT use conn.executescript() here — it unconditionally
+        # commits before running (see _split_sql_statements docstring),
+        # which silently defeats the BEGIN IMMEDIATE above and every
+        # rollback-on-failure path that depends on it. Run each
+        # statement individually instead, inside the real transaction.
+        for statement in _split_sql_statements(filepath.read_text()):
+            conn.execute(statement)
+        duration_ms = (time.monotonic_ns() - start) // 1_000_000
+        conn.execute(
+            "UPDATE migration_history SET status='applied', duration_ms=? WHERE id=?",
+            [duration_ms, record_id],
+        )
+        conn.execute("COMMIT")
+    except Exception as e:
+        # Idempotency: "duplicate column name" means the column already exists
+        # in schema.py (fresh install). Treat as success — the schema is correct.
+        if "duplicate column name" in str(e).lower():
+            duration_ms = (time.monotonic_ns() - start) // 1_000_000
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            conn.execute(
+                "UPDATE migration_history SET status='applied', duration_ms=? WHERE id=?",
+                [duration_ms, record_id],
+            )
+            conn.commit()
+            return
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        duration_ms = (time.monotonic_ns() - start) // 1_000_000
+        conn.execute(
+            "UPDATE migration_history SET status='failed', duration_ms=? WHERE id=?",
+            [duration_ms, record_id],
+        )
+        conn.commit()
+        raise MigrationError(f"Migration {filepath.name} failed: {e}") from e
+
+
+def apply_machine_setup(conn, filepath: Path, hostname: str, machine_id, commit,
+                        record_name=None):
+    """Same transaction pattern as apply_one, keyed by filename instead
+    of version since machine setup scripts are not sequentially ordered
+    relative to each other."""
+    checksum = sha256_file(filepath)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO machine_setup_history "
+        "(filename, checksum_sha256, tool_version, duration_ms, status, "
+        " hostname, machine_id, repo_commit) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        [record_name or filepath.name, checksum, TOOL_VERSION, 0, "running",
+         hostname, machine_id, commit],
+    )
+    record_id = cur.lastrowid
+    conn.commit()
+
+    start = time.monotonic_ns()
+    try:
+        # SQLite's ALTER TABLE RENAME triggers a full schema-wide view
+        # revalidation by default, not just views referencing the
+        # renamed table. v090 renames output_quality and has nothing to
+        # do with v_energy, but a stale v_energy (fixed separately —
+        # see v092) still fails the whole RENAME. legacy_alter_table
+        # disables that revalidation, matching pre-3.25 SQLite RENAME
+        # behavior. Confirmed safe here: no live view or trigger
+        # references output_quality by name on any current database
+        # (checked during 35G fleet rollout, 2026-09) — the only such
+        # reference lives in migrations/deprecated/legacy/030_chunk8_views.sql,
+        # which alems_migrate.py never discovers or applies. If a future
+        # migration adds a view/trigger that references a table being
+        # renamed in the SAME migration, that migration must recreate
+        # it explicitly afterward, since legacy_alter_table means SQLite
+        # will not do it automatically.
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        conn.execute("BEGIN IMMEDIATE")
+        # Do NOT use conn.executescript() here — it unconditionally
+        # commits before running (see _split_sql_statements docstring),
+        # which silently defeats the BEGIN IMMEDIATE above and every
+        # rollback-on-failure path that depends on it. Run each
+        # statement individually instead, inside the real transaction.
+        for statement in _split_sql_statements(filepath.read_text()):
+            conn.execute(statement)
+        duration_ms = (time.monotonic_ns() - start) // 1_000_000
+        conn.execute(
+            "UPDATE machine_setup_history SET status='applied', duration_ms=? WHERE id=?",
+            [duration_ms, record_id],
+        )
+        conn.execute("COMMIT")
+    except Exception as e:
+        conn.execute("ROLLBACK")
+        duration_ms = (time.monotonic_ns() - start) // 1_000_000
+        conn.execute(
+            "UPDATE machine_setup_history SET status='failed', duration_ms=? WHERE id=?",
+            [duration_ms, record_id],
+        )
+        conn.commit()
+        raise MigrationError(f"Machine setup {filepath.name} failed: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Manifest, Section 6
+# ---------------------------------------------------------------------------
+
+def generate_manifest(conn, hostname: str) -> None:
+    """Regenerates migration_manifest.json from migration_history after
+    every successful run. Data, not code, the experiment runner's startup
+    check reads this file only, never scans directories or imports
+    Python (Design Principle 10)."""
+    schema_versions = sorted(applied_versions(conn, "schema"))
+    seed_versions = sorted(applied_versions(conn, "seed"))
+    manifest = {
+        "schema_versions": schema_versions,
+        "seed_versions": seed_versions,
+        "tool_version": TOOL_VERSION,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "generated_by": hostname,
+    }
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=4) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Shared preflight, spec Section 5.5 steps 3 through 5
+# ---------------------------------------------------------------------------
+
+def preflight(conn, mtype: str, repo_files: dict, env_mode: str = "prod"):
+    """Runs the interrupted check, checksum verification, and set
+    comparison for one migration type. Raises MigrationError on any
+    block condition. Returns the sorted list of pending versions on
+    success."""
+    interrupted = running_versions(conn, mtype)
+    if interrupted:
+        raise MigrationError(
+            f"Interrupted {mtype} migration detected: {sorted(interrupted)}\n"
+            f"A previous run was interrupted (power loss or crash).\n"
+            f"Inspect the database manually and resolve before proceeding."
+        )
+
+    problems = verify_checksums(conn, mtype, repo_files, env_mode=env_mode)
+    if problems:
+        raise MigrationError(
+            "FATAL: Migration checksum mismatch.\n\n" + "\n\n".join(problems) +
+            "\n\nApplied migration differs from repository version. Refusing to "
+            "continue.\nFix: revert the file change, or create a new migration "
+            "to apply the correction as the next version."
+        )
+
+    applied = applied_versions(conn, mtype)
+    repo = set(repo_files.keys())
+    gaps, extra = check_gaps_and_extras(applied, repo)
+    if gaps:
+        raise MigrationError(
+            f"Migration gap detected ({mtype}).\n"
+            f"  Applied: {sorted(applied)}\n"
+            f"  Missing: {sorted(gaps)}\n"
+            f"Cannot proceed with gaps in migration history."
+        )
+    if extra:
+        raise MigrationError(
+            f"Applied {mtype} migrations not found in repository: {sorted(extra)}\n"
+            f"This machine has migrations from a different branch.\n"
+            f"Check your branch and pull latest code."
+        )
+
+    return sorted(repo - applied)
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def _update_sandbox_lock(conn) -> None:
+    """
+    After migrations apply, rewrite core_schema_version in alems.lock.
+    Uses _schema_versions from core/versioning.py which correctly filters
+    source='core' and version < 9000 from migration_history.
+    Only runs when invoked from a sandbox directory. Silent on failure
+    so a missing lock never aborts a successful migration.
+    """
+    try:
+        from core.cli.cmd_sandbox import _resolve_sandbox_path, _yaml_dump
+        from core.versioning import _schema_versions
+        sandbox_root = _resolve_sandbox_path()
+        if sandbox_root is None:
+            return
+        lock_file = sandbox_root / "alems.lock"
+        if not lock_file.exists():
+            return
+        import yaml
+        with open(lock_file) as f:
+            lock = yaml.safe_load(f) or {}
+        db_path = str(conn.execute("PRAGMA database_list").fetchone()[2])
+        schema_info = _schema_versions(db_path)
+        new_version = schema_info.get("core_schema_version") or lock.get("core_schema_version")
+        lock["core_schema_version"] = new_version
+        # Record attribution model versions for INV-17 (full lock in provenance).
+        # legacy_v1 is always present after 39.4b; expansion phases add more models.
+        lock.setdefault("attribution_model_versions", {})["legacy_v1"] = "1.0.0"
+        lock_file.write_text(_yaml_dump(lock))
+        print(f"  Updated alems.lock: core_schema_version -> {new_version}")
+    except Exception as exc:
+        print(f"  Warning: could not update alems.lock: {exc}")
+
+
+def _detect_platform_class() -> str:
+    """platform_class of this machine from the machine hw_config (design 7.13)."""
+    import sys
+    try:
+        root = str(MIGRATIONS_DIR.parent)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from core.storage.resolver import resolve_hw_config
+        return (resolve_hw_config() or {}).get("platform_class") or ""
+    except Exception as e:
+        print(f"WARNING: platform detection failed; platform seeds skipped: {e}")
+        return ""
+
+
+def discover_platform_seed_files(platform_class: str):
+    """Platform seed files for this machine's platform (G38a). Idempotent SQL."""
+    if not platform_class:
+        return []
+    d = MIGRATIONS_DIR / "platform" / platform_class
+    if not d.is_dir():
+        return []
+    return sorted(p for p in d.iterdir() if p.is_file() and p.suffix == ".sql")
+
+
+def _ensure_gpu_config(conn) -> None:
+    """Populate gpu_config for this store when empty (G39); never fails migrate."""
+    import os
+    import subprocess
+    import sys
+    try:
+        has = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='gpu_config'"
+        ).fetchone()
+        if not has or conn.execute("SELECT COUNT(*) FROM gpu_config").fetchone()[0]:
+            return
+        db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+        root = MIGRATIONS_DIR.parent
+        env = dict(os.environ, PYTHONPATH=str(root))
+        subprocess.run(
+            [sys.executable, str(root / "scripts" / "detect_gpu.py"), "--db", db_path],
+            cwd=str(root), env=env, check=False, timeout=120,
+        )
+    except Exception as e:
+        print(f"WARNING: gpu_config provisioning failed: {e}")
+
+
+def cmd_migrate(conn, hostname: str, machine_id, commit, env_mode: str = "prod") -> None:
+    ensure_tables(conn)
+    schema_files = discover_repo_files(SCHEMA_DIR, "v")
+    seed_files = discover_repo_files(SEED_DIR, "s")
+
+    pending_schema = preflight(conn, "schema", schema_files, env_mode=env_mode)
+    for version in pending_schema:
+        try:
+            apply_one(conn, schema_files[version], version, "schema", hostname, machine_id, commit)
+        except Exception as exc:
+            # G128: a new unique index refuses rows that are already duplicated
+            # (INV-D1). Name the fix instead of surfacing a raw SQLite error.
+            if "UNIQUE constraint failed" in str(exc):
+                raise MigrationError(
+                    "%s: duplicate rows block a unique index (%s). "
+                    "Fix: alems validate persistence --repair --yes, then rerun the migration."
+                    % (schema_files[version].name, exc)
+                ) from exc
+            raise
+        print(f"Applied schema {schema_files[version].name}")
+
+    pending_seed = preflight(conn, "seed", seed_files, env_mode=env_mode)
+    for version in pending_seed:
+        apply_one(conn, seed_files[version], version, "seed", hostname, machine_id, commit)
+        print(f"Applied seed {seed_files[version].name}")
+
+    applied_setup = applied_setup_filenames(conn)
+    setup_files = discover_machine_setup_files(hostname)
+    pending_setup = [f for f in setup_files if f.name not in applied_setup]
+    for filepath in pending_setup:
+        apply_machine_setup(conn, filepath, hostname, machine_id, commit)
+        print(f"Applied machine setup {filepath.name}")
+
+    # Platform seeds for this machine's platform, in every store (G38a).
+    platform_class = _detect_platform_class()
+    for filepath in discover_platform_seed_files(platform_class):
+        record = f"platform/{platform_class}/{filepath.name}"
+        if record not in applied_setup:
+            apply_machine_setup(conn, filepath, hostname, machine_id, commit,
+                                record_name=record)
+            print(f"Applied platform seed {record}")
+
+    # Device registry for this store (G39).
+    _ensure_gpu_config(conn)
+ 
+    # --- Extension migrations (35D) ---
+    # Run only when [extensions] active is present in app_settings.yaml.
+    # When absent, legacy mode is active and extension migrations are skipped.
+    pending_ext = _get_pending_extension_migrations(conn)
+    for ext_name, filepath, version in pending_ext:
+        _apply_extension_migration(conn, filepath, version, ext_name, hostname, machine_id, commit)
+        print(f"Applied extension migration: {ext_name} {filepath.name}")
+ 
+    generate_manifest(conn, hostname)
+    print(
+        f"\nTotal applied: {len(pending_schema)} schema, {len(pending_seed)} seed, "
+        f"{len(pending_setup)} machine setup, {len(pending_ext)} extension."
+    )
+    _update_sandbox_lock(conn)
+
+
+def _read_active_extensions() -> list:
+    """Read [extensions] active from config/app_settings.yaml.
+ 
+    Returns the list of active extension names, or an empty list when
+    the [extensions] key is absent (legacy mode — no extension migrations
+    are run). The empty-list return for legacy mode is intentional:
+    cmd_migrate still runs to zero completion with no extension work done.
+ 
+    Returns:
+        List of extension name strings (may be empty).
+    """
+    try:
+        import yaml
+        config_path = REPO_ROOT / "config" / "app_settings.yaml"
+        if not config_path.exists():
+            return []
+        with open(config_path, "r") as fh:
+            config = yaml.safe_load(fh) or {}
+        extensions_section = config.get("extensions")
+        if extensions_section is None:
+            # Key absent: legacy mode. No extension migrations.
+            return []
+        active = extensions_section.get("active") or []
+        if isinstance(active, str):
+            # Support scalar "active: orchestration" as well as list form.
+            active = [s.strip() for s in active.split(",") if s.strip()]
+        return list(active)
+    except Exception as exc:
+        print(f"Warning: could not read [extensions] from app_settings.yaml: {exc}")
+        return []
+ 
+ 
+def _get_pending_extension_migrations(conn) -> list:
+    """Discover pending extension migrations for all active extensions.
+ 
+    For each extension listed in [extensions] active, scans its migration
+    directory for e*.sql files not yet recorded in migration_history with
+    source='ext:<name>'. Returns them in order ready to apply.
+ 
+    Returns:
+        List of (ext_name, filepath, version) tuples, sorted by
+        (ext_name, version) for deterministic application order.
+    """
+    active_names = _read_active_extensions()
+    if not active_names:
+        return []
+ 
+    pending = []
+    for ext_name in active_names:
+        ext_dir = EXTENSIONS_DIR / ext_name
+        if not ext_dir.exists():
+            print(f"Warning: extension migration dir not found: {ext_dir} — skipping")
+            continue
+ 
+        source_key = f"ext:{ext_name}"
+        # Find versions already applied for this extension.
+        applied_rows = conn.execute(
+            "SELECT filename FROM migration_history WHERE source = ? AND status = 'applied'",
+            (source_key,),
+        ).fetchall()
+        applied_filenames_set = {r[0] for r in applied_rows}
+
+        ext_files = discover_repo_files(ext_dir, "e")
+        for version, filepath in sorted(ext_files.items()):
+            if filepath.name not in applied_filenames_set:
+                pending.append((ext_name, filepath, version))
+ 
+    return pending
+ 
+ 
+def _apply_extension_migration(
+    conn,
+    filepath: Path,
+    version: int,
+    ext_name: str,
+    hostname: str,
+    machine_id,
+    commit: str,
+) -> None:
+    """Apply one extension migration file.
+ 
+    Reuses apply_one() internals but records source='ext:<name>' in
+    migration_history so extension migrations are distinguishable from
+    core migrations in the history table and in --status output.
+ 
+    Args:
+        conn      : sqlite3 connection.
+        filepath  : Path to the e*.sql file.
+        version   : Integer version parsed from filename.
+        ext_name  : Extension identity string, e.g. "output_quality".
+        hostname  : Machine hostname for provenance.
+        machine_id: Machine ID from ~/.alemsrc.
+        commit    : Git commit hash for provenance.
+    """
+    import hashlib
+    import time
+ 
+    # FIX (2026-09-15, found shipping tool_selection alongside
+    # output_quality): version used to be 90000 + local version, with
+    # no extension identity in the number at all — every extension's
+    # e001 collided at exactly 90001 regardless of which extension it
+    # was. Now: the REAL local version number is stored (parsed
+    # straight from the e*.sql filename, same as `version` already is),
+    # and `source` — already present, already unique per extension —
+    # is what the UNIQUE(version, type, source) constraint (v093) uses
+    # to keep every extension's independent e001/e002/... sequence
+    # collision-free. Two different extensions can now both legitimately
+    # have version=1 — that's correct, not a bug. Full design:
+    # MIGRATION_HISTORY_SOURCE_SCOPED_UNIQUENESS.md.
+    #
+    # Same upsert/retry-safety pattern as apply_one() — this function
+    # previously had NONE at all, which is exactly what turned tonight's
+    # collision into an unhandled crash instead of a clean retry.
+    source_key = f"ext:{ext_name}"
+    checksum = sha256_file(filepath)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO migration_history "
+        "(version, type, filename, checksum_sha256, tool_version, duration_ms, "
+        " status, hostname, machine_id, repo_commit, source) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(version, type, source) DO UPDATE SET "
+        "  filename=excluded.filename, "
+        "  checksum_sha256=excluded.checksum_sha256, "
+        "  applied_at=datetime('now'), "
+        "  tool_version=excluded.tool_version, "
+        "  duration_ms=excluded.duration_ms, "
+        "  status=excluded.status, "
+        "  hostname=excluded.hostname, "
+        "  machine_id=excluded.machine_id, "
+        "  repo_commit=excluded.repo_commit",
+        [
+            version, "schema", filepath.name, checksum, TOOL_VERSION, 0,
+            "running", hostname, machine_id, commit, source_key,
+        ],
+    )
+    conn.commit()
+    record_id = conn.execute(
+        "SELECT id FROM migration_history WHERE version=? AND type=? AND source=?",
+        (version, "schema", source_key),
+    ).fetchone()[0]
+ 
+    start = time.monotonic_ns()
+    try:
+        # SQLite's ALTER TABLE RENAME triggers a full schema-wide view
+        # revalidation by default, not just views referencing the
+        # renamed table. v090 renames output_quality and has nothing to
+        # do with v_energy, but a stale v_energy (fixed separately —
+        # see v092) still fails the whole RENAME. legacy_alter_table
+        # disables that revalidation, matching pre-3.25 SQLite RENAME
+        # behavior. Confirmed safe here: no live view or trigger
+        # references output_quality by name on any current database
+        # (checked during 35G fleet rollout, 2026-09) — the only such
+        # reference lives in migrations/deprecated/legacy/030_chunk8_views.sql,
+        # which alems_migrate.py never discovers or applies. If a future
+        # migration adds a view/trigger that references a table being
+        # renamed in the SAME migration, that migration must recreate
+        # it explicitly afterward, since legacy_alter_table means SQLite
+        # will not do it automatically.
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        conn.execute("BEGIN IMMEDIATE")
+        # Do NOT use conn.executescript() here — it unconditionally
+        # commits before running (see _split_sql_statements docstring),
+        # which silently defeats the BEGIN IMMEDIATE above and every
+        # rollback-on-failure path that depends on it. Run each
+        # statement individually instead, inside the real transaction.
+        for statement in _split_sql_statements(filepath.read_text()):
+            conn.execute(statement)
+        duration_ms = (time.monotonic_ns() - start) // 1_000_000
+        conn.execute(
+            "UPDATE migration_history SET status='applied', duration_ms=? WHERE id=?",
+            [duration_ms, record_id],
+        )
+        conn.execute("COMMIT")
+    except Exception as exc:
+        if "duplicate column name" in str(exc).lower() or "already exists" in str(exc).lower():
+            # Idempotent: table or column already exists from a previous run.
+            duration_ms = (time.monotonic_ns() - start) // 1_000_000
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            conn.execute(
+                "UPDATE migration_history SET status='applied', duration_ms=? WHERE id=?",
+                [duration_ms, record_id],
+            )
+            conn.commit()
+            return
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        duration_ms = (time.monotonic_ns() - start) // 1_000_000
+        conn.execute(
+            "UPDATE migration_history SET status='failed', duration_ms=? WHERE id=?",
+            [duration_ms, record_id],
+        )
+        conn.commit()
+        raise MigrationError(
+            f"Extension migration {ext_name}/{filepath.name} failed: {exc}"
+        ) from exc
+ 
+ 
+def cmd_check(conn) -> int:
+    """Manifest only comparison, no directory scan, this is the cheap
+    startup gate from Section 7. Returns 0 if compatible, 1 otherwise."""
+    if not MANIFEST_PATH.exists():
+        print("FATAL: migration_manifest.json not found. Run: alems migrate")
+        return 1
+    manifest = json.loads(MANIFEST_PATH.read_text())
+    expected_schema = set(manifest["schema_versions"])
+    expected_seed = set(manifest["seed_versions"])
+    actual_schema = applied_versions(conn, "schema")
+    actual_seed = applied_versions(conn, "seed")
+
+    ok = True
+    if actual_schema != expected_schema:
+        ok = False
+        missing = expected_schema - actual_schema
+        extra = actual_schema - expected_schema
+        if missing:
+            print(f"Database behind code. Missing schema versions: {sorted(missing)}.\nRun: alems migrate")
+        if extra:
+            print(f"Database ahead of code. Extra schema versions: {sorted(extra)}.\nPull latest code or check your branch.")
+    if actual_seed != expected_seed:
+        ok = False
+        missing = expected_seed - actual_seed
+        extra = actual_seed - expected_seed
+        if missing:
+            print(f"Database behind code. Missing seed versions: {sorted(missing)}.\nRun: alems migrate")
+        if extra:
+            print(f"Database ahead of code. Extra seed versions: {sorted(extra)}.\nPull latest code or check your branch.")
+
+    if ok:
+        print("Schema compatible.")
+    return 0 if ok else 1
+
+
+def cmd_verify(conn) -> int:
+    """Checksum verification only, no new migrations applied."""
+    ensure_tables(conn)
+    schema_files = discover_repo_files(SCHEMA_DIR, "v")
+    seed_files = discover_repo_files(SEED_DIR, "s")
+    problems = verify_checksums(conn, "schema", schema_files) + verify_checksums(conn, "seed", seed_files)
+    if problems:
+        print("FATAL: Migration checksum mismatch.\n")
+        print("\n\n".join(problems))
+        return 1
+    print("All checksums verified clean.")
+    return 0
+
+
+def cmd_status(conn) -> None:
+    ensure_tables(conn)
+    print("=== migration_history ===")
+    rows = conn.execute(
+        "SELECT id, version, type, filename, status, applied_at, hostname, duration_ms "
+        "FROM migration_history ORDER BY type, version"
+    ).fetchall()
+    for r in rows:
+        print(f"  [{r[2]:6s}] v{r[1]:<4} {r[3]:<40} {r[4]:<8} {r[5]} {r[6]} {r[7]}ms")
+    print("\n=== machine_setup_history ===")
+    rows = conn.execute(
+        "SELECT id, filename, status, applied_at, hostname, duration_ms "
+        "FROM machine_setup_history ORDER BY applied_at"
+    ).fetchall()
+    for r in rows:
+        print(f"  {r[1]:<40} {r[2]:<8} {r[3]} {r[4]} {r[5]}ms")
+
+
+def cmd_plan(conn, hostname: str) -> None:
+    ensure_tables(conn)
+    schema_files = discover_repo_files(SCHEMA_DIR, "v")
+    seed_files = discover_repo_files(SEED_DIR, "s")
+
+    pending_schema = preflight(conn, "schema", schema_files)
+    pending_seed = preflight(conn, "seed", seed_files)
+
+    applied_setup = applied_setup_filenames(conn)
+    setup_files = discover_machine_setup_files(hostname)
+    pending_setup = [f for f in setup_files if f.name not in applied_setup]
+
+    print("Pending schema migrations:")
+    for v in pending_schema:
+        print(f"  {schema_files[v].name}")
+    if not pending_schema:
+        print("  (none)")
+
+    print("\nPending seed migrations:")
+    for v in pending_seed:
+        print(f"  {seed_files[v].name}")
+    if not pending_seed:
+        print("  (none)")
+
+    print(f"\nPending machine setup ({hostname}):")
+    for f in pending_setup:
+        print(f"  {f.name}")
+    if not pending_setup:
+        print("  (none)")
+
+    total = len(pending_schema) + len(pending_seed) + len(pending_setup)
+    print(f"\nTotal: {total} migrations to apply.")
+    if total:
+        print("Run 'alems dev migrate --run' to execute.")
+
+
+def cmd_adopt(conn, hostname: str, machine_id, commit, skip_confirmation=False) -> None:
+    """One time explicit adoption for UBUNTU2505 and GN100, spec Section
+    8.2/8.3. No auto detection, every file currently in schema/ and
+    seed/ is marked applied as is. This assumes schema_version on this
+    machine already reflects every file in those directories, true for
+    both production machines per spec Section 8.3. Verify file count
+    against schema_version before running this if in doubt."""
+    ensure_tables(conn)
+    schema_files = discover_repo_files(SCHEMA_DIR, "v")
+    seed_files = discover_repo_files(SEED_DIR, "s")
+
+    already = applied_versions(conn, "schema") | applied_versions(conn, "seed")
+    if already:
+        raise MigrationError(
+            "migration_history already has applied records. --adopt is for a "
+            "one time transition from schema_version only. Refusing to run "
+            "again, use 'alems migrate' for normal operation."
+        )
+
+    if not skip_confirmation:
+        print(
+            f"--adopt will mark {len(schema_files)} schema + {len(seed_files)} seed "
+            f"files as already applied, without re-running them.\n"
+            f"schema_version will be RENAMED to schema_version_archived (not deleted).\n"
+            f"This cannot be run again on this machine once it succeeds.\n"
+        )
+        answer = input("Type ADOPT to continue: ")
+        if answer.strip() != "ADOPT":
+            print("Aborted, nothing changed.")
+            return
+
+    for version, filepath in sorted(schema_files.items()):
+        checksum = sha256_file(filepath)
+        conn.execute(
+            "INSERT INTO migration_history "
+            "(version, type, filename, checksum_sha256, tool_version, duration_ms, "
+            " status, hostname, machine_id, repo_commit) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [version, "schema", filepath.name, checksum, TOOL_VERSION, 0,
+             "applied", hostname, machine_id, commit],
+        )
+    for version, filepath in sorted(seed_files.items()):
+        checksum = sha256_file(filepath)
+        conn.execute(
+            "INSERT INTO migration_history "
+            "(version, type, filename, checksum_sha256, tool_version, duration_ms, "
+            " status, hostname, machine_id, repo_commit) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [version, "seed", filepath.name, checksum, TOOL_VERSION, 0,
+             "applied", hostname, machine_id, commit],
+        )
+    conn.commit()
+
+    # RENAME schema_version, never drop. A real incident on 2026-07-05
+    # (GN100) showed schema_version was still a live dependency,
+    # environment_config.schema_version reads MAX(rowid) from it.
+    # Dropping broke that until manually restored from a backup.
+    existing = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
+    ).fetchone()
+    if existing:
+        conn.execute("ALTER TABLE schema_version RENAME TO schema_version_archived")
+        conn.commit()
+
+    generate_manifest(conn, hostname)
+    print(
+        f"Adopted {len(schema_files)} schema + {len(seed_files)} seed migrations as "
+        f"applied. schema_version renamed to schema_version_archived (not deleted). "
+        f"migration_manifest.json generated."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def get_db_path() -> str:
+    """Delegates to the existing get_alems_db_path() path resolution so
+    this tool never hardcodes a DB location. path_loader.py lives in the
+    same scripts/tools/ directory as this file, Python already puts the
+    running script's own directory at sys.path[0], so no extra path
+    manipulation is needed."""
+    from path_loader import get_alems_db_path
+    return get_alems_db_path()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="alems_migrate.py",
+        description="A-LEMS migration runner, SQLite only, set based version tracking.",
+    )
+    parser.add_argument(
+        "--check", action="store_true",
+        help="Compare applied migrations against migration_manifest.json. Read only.",
+    )
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="Recompute checksums for every applied migration. Read only. Catches a "
+             "file edited after being applied.",
+    )
+    parser.add_argument(
+        "--status", action="store_true",
+        help="Print migration_history and machine_setup_history in full. Read only.",
+    )
+    parser.add_argument(
+        "--plan", action="store_true",
+        help="Show pending schema/seed/machine setup files. Read only. Always run "
+             "this before migrate or --adopt.",
+    )
+    parser.add_argument(
+        "--adopt", action="store_true",
+        help="ONE TIME ONLY, for a machine with existing schema_version history and "
+             "no migration_history yet. Marks files in schema/ and seed/ as already "
+             "applied without re-running them. Renames (never deletes) schema_version. "
+             "Asks for confirmation unless --yes is passed. Refuses if "
+             "migration_history already has applied records.",
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="Skip the --adopt confirmation prompt. Scripted use only.",
+    )
+    parser.add_argument(
+        "--run", action="store_true",
+        help="Apply all pending migrations. Without this flag, shows plan only.",
+    )
+    parser.add_argument(
+        "--store", default=None,
+        help="Store to migrate (path to experiments.db). Default: the resolved store.",
+    )
+    parser.add_argument(
+        "--env-mode", choices=["prod", "dev", "integration", "preprod"],
+        default=None,
+        help="Environment mode. dev: heals checksum mismatches. prod: fatal on mismatch. "
+             "Auto-detected from .alems-env if not specified.",
+    )
+    args = parser.parse_args()
+
+    # Resolve env_mode: CLI arg > .alems-env > default prod
+    if args.env_mode:
+        env_mode = args.env_mode
+    else:
+        env_file = REPO_ROOT / ".alems-env"
+        if env_file.exists():
+            raw = env_file.read_text().strip()
+            # Support both key=value and legacy single-token format
+            env_mode = "prod"
+            for line in raw.splitlines():
+                line = line.strip()
+                if line.startswith("ALEMS_ENV="):
+                    env_mode = line.split("=", 1)[1].strip()
+                    break
+                elif line and "=" not in line:
+                    env_mode = line
+                    break
+        else:
+            env_mode = "prod"
+
+    hostname = get_hostname()
+    machine_id = get_machine_id()
+    commit = get_repo_commit()
+    # Explicit store wins (G28); otherwise the normal resolution.
+    db_path = os.path.abspath(args.store) if args.store else get_db_path()
+    try:
+        from core.storage.inprocess_writer import _ProjectLock
+        _mig_lock = _ProjectLock(db_path, timeout_s=60.0)
+        _mig_lock.acquire()
+    except ImportError:
+        _mig_lock = None
+    except Exception as _lock_err:
+        print(f"alems_migrate: cannot acquire writer lock: {_lock_err}", file=sys.stderr)
+        return 1
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    # Bootstrap guard: machines below v089 lack the source column in
+    # migration_history. Add it before any query references it.
+    _mh_cols = [r[1] for r in conn.execute("PRAGMA table_info(migration_history)").fetchall()]
+    if _mh_cols and 'source' not in _mh_cols:
+        conn.execute("ALTER TABLE migration_history ADD COLUMN source TEXT DEFAULT 'core'")
+        conn.commit()
+
+    try:
+        if args.check:
+            return cmd_check(conn)
+        if args.verify:
+            return cmd_verify(conn)
+        if args.status:
+            cmd_status(conn)
+            return 0
+        if args.plan:
+            cmd_plan(conn, hostname)
+            return 0
+        if args.adopt:
+            cmd_adopt(conn, hostname, machine_id, commit, skip_confirmation=args.yes)
+            return 0
+        if args.run:
+            cmd_migrate(conn, hostname, machine_id, commit, env_mode=env_mode)
+            return 0
+        # No action flag given — show plan and usage, never apply.
+        cmd_plan(conn, hostname)
+        print("", file=sys.stderr)
+        print("  Run 'alems dev migrate --run' to apply pending migrations.", file=sys.stderr)
+        return 0
+    except MigrationError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+        if _mig_lock is not None:
+            _mig_lock.release()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

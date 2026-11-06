@@ -1,0 +1,18 @@
+{
+ "name": "earParity",
+ "result": "111 of 111",
+ "replayed": 111,
+ "identical": 111,
+ "parity": true,
+ "energy_mismatch": 0,
+ "skipped_by_design": {
+  "decider_xstar_rule": 111,
+  "decider_token_rule": 111
+ },
+ "mode": "logged payload only (default); export tokens variant is a diagnostic, not a claim",
+ "decisions_file": "inputs/artifacts/raf_e3/e3_decisions.jsonl",
+ "decisions_sha256": "3537f813842af1a4387a46c6c24499cfe2aa1204f5dab21d160aef5613057c5d",
+ "params": "controller_params_r5-1.json, sha256 089fe00fa408270cb5be05200da3dec0975b31d13144937ef082db8a93611bcc",
+ "code": "alems-ear parity.py at bf29937",
+ "source_file_sha256": "6eff3c56984adc9c1eaaea67e008f89d95e9d877d83af11d9b81e64b7f920936"
+}

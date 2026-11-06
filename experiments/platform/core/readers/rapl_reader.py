@@ -1,0 +1,619 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+RAPL ENERGY READER - Intel Running Average Power Limit Interface
+================================================================================
+
+This module provides access to Intel RAPL (Running Average Power Limit) energy
+counters. RAPL is a hardware feature that provides energy consumption estimates
+for different power domains within the CPU.
+
+Why RAPL over external power meters:
+- Microsecond-scale sampling possible
+- Per-domain breakdown (critical for orchestration tax attribution)
+- Available on all modern Intel/AMD systems
+- No additional hardware required
+
+RAPL provides energy in microjoules since system boot (cumulative counter).
+To measure energy over an interval:
+    1. Read counter at start (E1)
+    2. Read counter at end (E2)
+    3. Energy = E2 - E1 (handling wrap-around)
+
+Reference: Intel Software Developer's Manual, Volume 3, Chapter 14.9
+
+Author: Deepak Panigrahy
+================================================================================
+"""
+
+import logging
+import os
+import time
+import subprocess
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from core.utils.formula import formula
+from core.readers.interfaces import EnergyReaderABC
+# Configure module logger
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# RAPL READER CLASS
+# ============================================================================
+
+# GPU PP1 MSR address and energy unit (Tiger Lake, i7-1165G7)
+# MSR_PP1_ENERGY_STATUS — Iris Xe GPU energy accumulator
+GPU_PP1_MSR      = "0x641"
+# Energy unit from MSR 0x606 bits[12:8]=14 → 0.5^14 J = 61.0352 µJ per LSB
+GPU_ENERGY_UNIT_UJ = 61.0352
+
+class RAPLReader(EnergyReaderABC):
+    """
+    Reads Intel RAPL (Running Average Power Limit) energy counters from sysfs.
+
+    This class handles the low-level interaction with the RAPL interface,
+    including:
+    - Detecting available domains via name files
+    - Reading energy values with retry logic
+    - Handling permission issues gracefully
+    - Supporting high-frequency sampling
+
+    The reader is designed to be used by the EnergyEngine, not directly
+    by end users.
+
+    Req 1.1: RAPL energy measurement
+    Req 1.3: Uncore waste calculation
+    Req 1.46: High-frequency sampling support
+    """
+
+    # Standard domain names expected from the kernel
+    # These are used for mapping, but we'll use whatever the system provides
+        # ------------------------------------------------------------------
+    # Methodology attributes — read by scripts/seed_methodology.py
+    # Formula lives on get_energy_delta() via @formula decorator
+    # ------------------------------------------------------------------
+    METHOD_ID          = "rapl_msr_pkg_energy"
+    FIDELITY = "MEASURED"
+    METHOD_NAME        = "RAPL MSR Direct Package Energy"
+    METHOD_LAYER       = "silicon"
+    METHOD_CONFIDENCE  = 1.0
+    METHOD_PARAMS      = {"msr": "0x611", "domain": "package", "rate_hz": 100}
+    FALLBACK_METHOD_ID = "ml_energy_estimator"
+    METHOD_PROVENANCE  = "MEASURED"
+    PRIORITY: int      = 100
+
+    @classmethod
+    def can_handle(cls, caps) -> bool:
+        """Eligible on Linux x86_64 in MEASURED mode, not synthetic platform."""
+        return (
+            caps.os == "Linux"
+            and caps.arch == "x86_64"
+            and caps.measurement_mode == "MEASURED"
+            and getattr(caps, "platform_class", "") != "synthetic"
+        )
+ 
+    METHOD_LAYER       = "silicon"
+    METHOD_CONFIDENCE  = 1.0
+    METHOD_PARAMS      = {"msr": "0x611", "domain": "package", "rate_hz": 100}
+    FALLBACK_METHOD_ID = "ml_energy_estimator"
+    METHOD_PROVENANCE  = "MEASURED"
+
+    STANDARD_DOMAINS = {
+        "package-0": "package",  # Primary package domain
+        "package-1": "package",  # Second socket (if present)
+        "core": "core",  # Core power plane
+        "pp0": "core",  # Alternative name for core
+        "uncore": "uncore",  # Uncore (cache, memory controller)
+        "pp1": "uncore",  # Alternative name for uncore/graphics
+        "dram": "dram",  # DRAM controller
+        "psys": "psys",  # Platform (entire SoC)
+        "gpu": "gpu",  # Integrated GPU (on some systems)
+    }
+
+    def __init__(self, config: Dict):
+        """
+        Initialize RAPL reader with hardware configuration.
+
+        Args:
+            config: Can be either:
+                   - Full config with 'rapl' key: {'rapl': {'paths': {...}}}
+                   - Direct rapl section: {'paths': {...}, 'available_domains': [...]}
+        """
+        # Handle both config formats
+        if "rapl" in config:
+            # Full config with nested rapl section (from main config)
+            rapl_config = config["rapl"]
+            logger.debug("Using nested rapl config format")
+        else:
+            # Already the rapl section (from sampling.py)
+            rapl_config = config
+            logger.debug("Using direct rapl config format")
+
+        # Extract paths
+        self.rapl_paths = rapl_config.get("paths", {})
+
+        logger.info(
+            "Initializing RAPLReader with %d configured domains", len(self.rapl_paths)
+        )
+
+        # Validate which paths are actually accessible
+        self.available_paths = {}
+        self.domain_map = {}  # Maps standard names to actual paths
+
+        for domain_name, path in self.rapl_paths.items():
+            if self._validate_path(path):
+                self.available_paths[domain_name] = path
+
+                # Map to standard domain name if possible
+                std_name = self._get_standard_domain(domain_name)
+                self.domain_map[std_name] = path
+
+                logger.debug(
+                    "RAPL domain available: %s -> %s (%s)", domain_name, std_name, path
+                )
+            else:
+                logger.warning(
+                    "RAPL domain not accessible: %s at %s", domain_name, path
+                )
+
+        # Log summary
+        if self.available_paths:
+            logger.info(
+                "RAPLReader initialized with %d accessible domains: %s",
+                len(self.available_paths),
+                list(self.available_paths.keys()),
+            )
+        else:
+            logger.error("No RAPL domains accessible! Check permissions.")
+
+        # Initialize last readings for wrap-around detection
+        self.last_readings = {}
+        # Detect GPU MSR availability once at init — avoid per-sample overhead
+        self.gpu_pp1_available = self._detect_gpu_pp1()
+        if self.gpu_pp1_available:
+            logger.info("GPU PP1 MSR 0x641 available — gpu columns will be populated")
+        else:
+            logger.info("GPU PP1 MSR 0x641 not readable — gpu columns will be NULL")        
+
+    def _detect_gpu_pp1(self) -> bool:
+        """
+        Check if MSR 0x641 (GPU PP1 energy) is readable via msr_read binary.
+        Called once at init. Never raises — returns False on any error.
+        Returns:
+            True if GPU PP1 MSR is readable, False otherwise.
+        """
+        try:
+            msr_bin = self._find_msr_binary()
+            if not msr_bin:
+                return False
+            result = subprocess.run(
+                [msr_bin, "0", GPU_PP1_MSR],
+                capture_output=True, text=True, timeout=1
+            )
+            return result.returncode == 0 and result.stdout.strip().isdigit()
+        except Exception as e:
+            logger.debug("GPU PP1 detection failed: %s", e)
+            return False
+    def _find_msr_binary(self) -> Optional[str]:
+        """
+        Locate the msr_read binary relative to this file.
+        Returns path string if found and executable, None otherwise.
+        """
+        # msr_read lives in core/msr_helper/ relative to repo root
+        candidate = Path(__file__).parent.parent / "msr_helper" / "msr_read"
+        if candidate.exists() and os.access(str(candidate), os.X_OK):
+            return str(candidate)
+        logger.debug("msr_read binary not found at %s", candidate)
+        return None
+    def read_gpu_msr(self) -> Optional[int]:
+        """
+        Read MSR 0x641 (MSR_PP1_ENERGY_STATUS) and return value in µJ.
+        Converts raw MSR counter to µJ using GPU_ENERGY_UNIT_UJ (61.0352).
+        Returns:
+            Energy in µJ as integer, or None if unavailable/error.
+        """
+        if not self.gpu_pp1_available:
+            return None
+        try:
+            msr_bin = self._find_msr_binary()
+            if not msr_bin:
+                return None
+            result = subprocess.run(
+                [msr_bin, "0", GPU_PP1_MSR],
+                capture_output=True, text=True, timeout=1
+            )
+            if result.returncode != 0 or not result.stdout.strip().isdigit():
+                logger.warning("GPU MSR read failed: %s", result.stderr.strip())
+                return None
+            # Convert raw counter to µJ using RAPL energy unit
+            raw = int(result.stdout.strip())
+            return int(raw * GPU_ENERGY_UNIT_UJ)
+        except Exception as e:
+            logger.warning("GPU MSR read exception: %s", e)
+            return None
+        
+    def _validate_path(self, path: str) -> bool:
+        """
+        Validate that a RAPL path exists and is readable.
+
+        This method checks both file existence and read permissions.
+        It's called during initialization to filter out inaccessible domains.
+
+        Args:
+            path: Sysfs path to validate
+
+        Returns:
+            True if path exists and is readable, False otherwise
+        """
+        path_obj = Path(path)
+
+        # Check if file exists
+        if not path_obj.exists():
+            logger.debug("RAPL path does not exist: %s", path)
+            return False
+
+        # Check if we can read it (permissions)
+        try:
+            with open(path_obj, "r") as f:
+                # Just read a small amount to test permissions
+                f.read(10)
+            return True
+        except PermissionError:
+            logger.debug("RAPL path permission denied: %s", path)
+            return False
+        except Exception as e:
+            logger.debug("RAPL path error: %s - %s", path, e)
+            return False
+
+    def _get_standard_domain(self, domain_name: str) -> str:
+        """
+        Map a domain name to a standard type.
+
+        Different systems use different naming conventions. This method
+        attempts to map whatever the system provides to one of our
+        standard domain types: 'package', 'core', 'uncore', 'dram', etc.
+
+        Args:
+            domain_name: Raw domain name from sysfs (e.g., 'package-0')
+
+        Returns:
+            Standardized domain name
+        """
+        domain_lower = domain_name.lower()
+
+        # Check against known patterns
+        for pattern, std_name in self.STANDARD_DOMAINS.items():
+            if pattern in domain_lower:
+                return std_name
+
+        # If no match, return as-is (might be custom)
+        logger.debug("Unknown RAPL domain type: %s", domain_name)
+        return domain_name
+
+    def read_energy(self) -> Dict[str, int]:
+        """
+        Read current energy values from all available RAPL domains.
+
+        This method reads the cumulative energy counters from sysfs.
+        The values are in microjoules and increase monotonically until
+        they wrap around (typically after ~2^32 µJ, about 70 minutes on a 100W CPU).
+
+        Returns:
+            Dictionary mapping domain names to energy in microjoules.
+            Example: {'package': 12345678, 'core': 8765432, 'uncore': 3580246}
+
+        Raises:
+            IOError: If a previously available path becomes inaccessible
+        """
+        readings = {}
+
+        for domain_name, path in self.available_paths.items():
+            try:
+                with open(path, "r") as f:
+                    value = int(f.read().strip())
+                readings[domain_name] = value
+
+                # Store for wrap-around detection
+                self.last_readings[domain_name] = value
+
+            except Exception as e:
+                logger.error("Failed to read RAPL domain %s: %s", domain_name, e)
+                # Re-raise as IOError to signal serious problem
+                raise IOError(f"RAPL read failed for {domain_name}: {e}")
+
+        return readings
+
+    def read_energy_safe(self, max_retries: int = 3) -> Dict[str, int]:
+        """
+        Read energy with retry logic for transient failures.
+
+        Args:
+            max_retries: Number of retry attempts before giving up
+
+        Returns:
+            Dictionary mapping domain names to energy in microjoules
+            (may be zeros if all retries fail)
+
+        Req 1.46: Used by high-frequency sampler to ensure robust readings.
+        """
+        for attempt in range(max_retries):
+            try:
+                return self.read_energy()
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"RAPL read failed after {max_retries} attempts: {e}")
+                    # Get domains via method
+                    domains = self.get_available_domains()
+                    return {domain: 0 for domain in domains}
+                logger.debug(f"RAPL read attempt {attempt+1} failed, retrying...")
+                time.sleep(0.01)  # Brief pause before retry
+        return {}  # Fallback (shouldn't reach here)
+
+    def read_with_retry(self, max_retries: int = 3) -> Dict[str, int]:
+        """
+        Read energy with retry logic for transient failures.
+
+        Occasional read failures can happen due to kernel contention.
+        This method retries a few times before giving up.
+
+        Args:
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            Dictionary of energy readings (may be partial if all retries fail)
+
+        Note:
+            If all retries fail, returns empty dict and logs error.
+            This is better than crashing the entire experiment.
+        """
+        for attempt in range(max_retries):
+            try:
+                return self.read_energy()
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(
+                        "RAPL read failed after %d attempts: %s", max_retries, e
+                    )
+                    return {}
+                logger.debug("RAPL read attempt %d failed, retrying...", attempt + 1)
+                time.sleep(0.01)  # Brief pause before retry
+
+        return {}  # Should never reach here, but just in case
+
+
+    @formula(
+        latex=r"E_{d} = \begin{cases} R_{end} - R_{start} & \text{if } R_{end} \geq R_{start} \\ (2^{32}-1 - R_{start}) + R_{end} & \text{(wrap-around)} \end{cases}",
+        variables={
+            "E_d":     "Energy delta for domain d in µJ",
+            "R_end":   "RAPL sysfs counter at interval end",
+            "R_start": "RAPL sysfs counter at interval start",
+        }
+    )
+    def get_energy_delta(
+        self, start_readings: Dict[str, int], end_readings: Dict[str, int]
+    ) -> Dict[str, int]:
+        """
+        Calculate energy consumed between two readings.
+
+        Handles counter wrap-around by assuming counters never wrap more than once
+        in a measurement interval (safe assumption for typical experiment durations).
+
+        Args:
+            start_readings: Readings at start of interval
+            end_readings: Readings at end of interval
+
+        Returns:
+            Dictionary mapping domains to energy consumed in microjoules
+        """
+        deltas = {}
+
+        for domain, start_val in start_readings.items():
+            if domain in end_readings:
+                end_val = end_readings[domain]
+
+                # Handle wrap-around (counter resets to 0 after reaching max)
+                if end_val >= start_val:
+                    delta = end_val - start_val
+                else:
+                    # Counter wrapped around
+                    # Assume 32-bit counter (2^32 - 1 max)
+                    max_val = 2**32 - 1
+                    delta = (max_val - start_val) + end_val
+                    logger.debug(
+                        "RAPL counter wrapped for %s: %d -> %d, delta=%d",
+                        domain,
+                        start_val,
+                        end_val,
+                        delta,
+                    )
+
+                deltas[domain] = delta
+
+        return deltas
+
+    def get_available_domains(self) -> List[str]:
+        """
+        Get list of available RAPL domains.
+
+        Returns:
+            List of domain names that are currently accessible
+        """
+        return list(self.available_paths.keys())
+
+    def has_dram(self) -> bool:
+        """
+        Check if DRAM energy counter is available.
+
+        DRAM counter is only present on server CPUs and some high-end desktops.
+        Mobile/laptop CPUs typically don't have it.
+
+        Returns:
+            True if DRAM domain is available
+        """
+        return any("dram" in domain.lower() for domain in self.available_paths)
+
+    def get_package_path(self) -> Optional[str]:
+        """
+        Get the path to the package energy counter.
+
+        The package domain is the most important – it measures total CPU energy.
+
+        Returns:
+            Path to package energy file, or None if not available
+        """
+        for domain, path in self.available_paths.items():
+            if "package" in domain.lower():
+                return path
+        return None
+
+    def get_core_path(self) -> Optional[str]:
+        """
+        Get the path to the core energy counter.
+
+        Core energy is used to calculate uncore waste (package - core).
+
+        Returns:
+            Path to core energy file, or None if not available
+        """
+        for domain, path in self.available_paths.items():
+            if domain.lower() in ["core", "pp0"]:
+                return path
+        return None
+
+# --- EnergyReaderABC compatibility (Chunk 1) ---
+
+    def get_name(self) -> str:
+        """Return reader name for factory logging and platform summary."""
+        return "RAPLReader"
+
+    def is_available(self) -> bool:
+        """Return True if at least one RAPL domain is accessible."""
+        return len(self.available_paths) > 0
+
+    def get_domains(self) -> list:
+        """Return list of accessible RAPL domain names."""
+        return list(self.available_paths.keys())
+
+    def get_measurement_schema(self):
+        """Return RAPL x86 measurement schema — 32-bit counters at 100 Hz."""
+        from core.readers.measurement_schema import SCHEMA_RAPL_X86
+        return SCHEMA_RAPL_X86
+    
+    def read_energy_uj(self) -> dict:
+        """EnergyReaderABC interface — delegates to read_energy_safe()."""
+        return self.read_energy_safe()
+    def read_normalized(self) -> "NormalizedEnergyReading":
+        """Map RAPL domain keys to canonical NormalizedEnergyReading.
+
+        RAPL key mapping (Intel/AMD x86_64):
+            package-0 or package -> pkg_uj  (full package envelope)
+            core                 -> cpu_uj  (CPU cores subdomain)
+            gpu                  -> None    (PP1 handled by gpu_collector)
+            dram                 -> dram_uj (memory controller domain)
+
+        gpu_uj is None: RAPL PP1 is read by gpu_collector.py through a
+        separate MSR path to avoid double-counting (MIC-1 separation).
+        """
+        import time
+        from core.models.normalized_energy_reading import NormalizedEnergyReading
+        raw = self.read_energy_safe()
+        return NormalizedEnergyReading(
+            pkg_uj  = raw.get("package-0") or raw.get("package"),
+            cpu_uj  = raw.get("core"),
+            gpu_uj  = None,
+            dram_uj = raw.get("dram"),
+            ts_ns   = time.monotonic_ns(),
+        )  
+    def __str__(self) -> str:
+        """
+        String representation of RAPL reader state.
+
+        Returns:
+            Human-readable summary of available domains
+        """
+        domains = ", ".join(self.available_paths.keys())
+        return f"RAPLReader(domains=[{domains}])"
+
+    def __repr__(self) -> str:
+        """Detailed representation for debugging."""
+        return f"RAPLReader(paths={self.available_paths})"
+
+
+# ============================================================================
+# USAGE EXAMPLE
+# ============================================================================
+
+if __name__ == "__main__":
+    """
+    Example: Testing RAPLReader with a simple measurement.
+
+    This demonstrates basic usage and can be used to verify that
+    RAPL is working correctly on your system.
+
+    Run with: python -m core.readers.rapl_reader
+    """
+    import sys
+    import time
+    from pathlib import Path
+
+    # Set up logging
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    from core.observability.console import get_console
+    con = get_console()
+    con.section("rapl reader test")
+
+    config_path = Path("config/hw_config.json")
+    if not config_path.exists():
+        con.line("no config file found: default rapl paths used")
+        # Create minimal test config
+        test_config = {
+            "rapl": {
+                "paths": {
+                    "package-0": "/sys/class/powercap/intel-rapl:intel-rapl:0/energy_uj",
+                    "core": "/sys/class/powercap/intel-rapl:intel-rapl:0:0/energy_uj",
+                    "uncore": "/sys/class/powercap/intel-rapl:intel-rapl:0:1/energy_uj",
+                }
+            }
+        }
+        config = test_config
+    else:
+        import json
+
+        with open(config_path) as f:
+            config = json.load(f)
+        con.kv("config", config_path)
+
+    try:
+        reader = RAPLReader(config)
+        con.line(str(reader))
+    except Exception as e:
+        con.line("rapl reader failed to initialize: %s" % e)
+        sys.exit(1)
+
+    start_readings = reader.read_with_retry()
+    if not start_readings:
+        con.line("rapl counters could not be read")
+        sys.exit(1)
+    con.section("initial reading")
+    for domain, value in start_readings.items():
+        con.kv(domain, "%s uJ" % value)
+
+    time.sleep(2)
+    end_readings = reader.read_with_retry()
+    con.section("reading after 2 s")
+    for domain, value in end_readings.items():
+        con.kv(domain, "%s uJ" % value)
+
+    deltas = reader.get_energy_delta(start_readings, end_readings)
+    con.section("energy consumed")
+    for domain, delta in deltas.items():
+        con.kv(domain, "%10d uJ (%.6f J)" % (delta, delta / 1e6))
+    if "package-0" in deltas and "core" in deltas:
+        uncore = max(0, deltas.get("package-0", 0) - deltas.get("core", 0))
+        con.kv("uncore (package minus core)", "%d uJ (%.6f J)" % (uncore, uncore / 1e6))
+    con.line("rapl reader test complete")

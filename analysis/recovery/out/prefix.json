@@ -1,0 +1,45 @@
+{
+ "E1": {
+  "blocks": 240,
+  "identical_all_calls": 238,
+  "identical_before_failed_call": 238,
+  "by_situation": {
+   "json_parse|early": "30 of 30",
+   "json_parse|late": "29 of 30",
+   "rate_limit|early": "30 of 30",
+   "rate_limit|late": "30 of 30",
+   "timeout|early": "30 of 30",
+   "timeout|late": "29 of 30",
+   "tool_error|early": "30 of 30",
+   "tool_error|late": "30 of 30"
+  },
+  "divergences": [
+   [
+    "div at call 3 of 6",
+    1
+   ],
+   [
+    "div at call 4 of 8",
+    1
+   ]
+  ]
+ },
+ "E1b": {
+  "blocks": 240,
+  "identical_all_calls": 240,
+  "identical_before_failed_call": 240,
+  "by_situation": {
+   "json_parse|early": "30 of 30",
+   "json_parse|late": "30 of 30",
+   "rate_limit|early": "30 of 30",
+   "rate_limit|late": "30 of 30",
+   "timeout|early": "30 of 30",
+   "timeout|late": "30 of 30",
+   "tool_error|early": "30 of 30",
+   "tool_error|late": "30 of 30"
+  },
+  "divergences": []
+ },
+ "cross_SR_warm_vs_E1b_RB_warm": "239 of 240",
+ "cross_FR_warm_vs_E1b_RB_warm": "239 of 240"
+}

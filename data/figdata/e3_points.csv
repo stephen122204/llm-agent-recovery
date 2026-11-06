@@ -1,0 +1,7 @@
+policy,label,ach_j,ok,n,succ_lo,succ_hi
+FR_warm,always restart,1661.6,101,111,0.8421,0.9503
+SR_warm,always resume,1413.9,97,111,0.7994,0.9234
+RB_cold,always roll back,1352.6,101,111,0.8421,0.9503
+ctrl_beta,EAR, learning mode,1458.7,95,111,0.7786,0.9093
+xstar_rule,threshold rule,1406.4,98,111,0.8099,0.9303
+token_rule,EAR,1295.8,100,111,0.8312,0.9438

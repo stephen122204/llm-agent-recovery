@@ -1,0 +1,37 @@
+{
+ "snapshot": "raf_snapshot_oct20b.db",
+ "snapshot_sha256": "d5fa57f5a4f0ff5e8c48ff6788cb009ee887f2accb5793b55dfba1779b5dbbf5",
+ "heldout_sha256": "1e1cfb0426edfef14e406b7b257fb71d1b094fba639e579eafcd0bfa4264bdbf",
+ "training_tasks": 31,
+ "goals": 2269,
+ "params_sha256": "97ecd54a677f55d06967678fe6def2f318524c4713f97a0b9592de445a97076b",
+ "version": "selector_lr_v2",
+ "features": [
+  "cls=json_parse",
+  "cls=rate_limit",
+  "cls=silent_detected",
+  "cls=timeout",
+  "cls=tool_error",
+  "calls_done"
+ ],
+ "coef": [
+  0.22871972032158538,
+  0.22875446444620817,
+  -0.8513330357992774,
+  0.10198670394560239,
+  0.2917181397371589,
+  0.0018305942688721206
+ ],
+ "intercept": 0.00888108468079336,
+ "C": 1.0,
+ "threshold": 0.5,
+ "decision": "p = 1 / (1 + exp(-(intercept + sum(coef[i] * x[i])))); uncached_tokens if p > threshold else cost_model_mean",
+ "encoding": "cls=<c> is 1 if the observable class equals <c>, else 0 (an unseen class has all zeros); calls_done = calls (model plus tool) completed in attempt 1, unscaled",
+ "methods": {
+  "cost_model_mean": "posterior mean, inputs class, point, calls done, context tokens 0",
+  "uncached_tokens": "fewest uncached tokens to finish, tok_a + tok_b * calls done"
+ },
+ "label": "1 if the token method had lower energy per achieved goal than the cost model in the block",
+ "fit": "L2 logistic regression, lbfgs, C from [0.001, 0.0031622776601683794, 0.01, 0.03162277660168379, 0.09999999999999999, 0.31622776601683794, 1.0, 3.162277660168379, 10.0, 31.622776601683796, 100.0, 316.2277660168379, 1000.0] by GroupKFold by task, scoring accuracy",
+ "training_blocks": 272
+}

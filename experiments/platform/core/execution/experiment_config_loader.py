@@ -1,0 +1,283 @@
+"""
+experiment_config_loader.py — Shared YAML config loader for experiment entry points.
+
+Loads experiment config YAML and overrides argparse args in place.
+Both test_harness.py and run_experiment.py call apply_config() after parse_args().
+Adding new config keys here propagates to all entry points automatically.
+"""
+
+import logging
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+def apply_config(args) -> None:
+    """
+    Load experiment config YAML and override args in place.
+
+    Called after parse_args(). If args.config is None, returns immediately —
+    all CLI defaults are preserved. When config is present, only keys that
+    exist in the YAML override the corresponding arg. Missing keys keep their
+    CLI defaults, so partial configs are valid.
+
+    Args:
+        args: argparse.Namespace — mutated in place.
+
+    Returns:
+        None. args is mutated directly.
+    """
+    config_path = getattr(args, "config", None)
+    if not config_path:
+        # No config file — CLI args stand as-is
+        return
+
+    # Validate path before importing yaml — gives clear error message
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"config file not found: {config_path}\n"
+            f"Check the path and try again."
+        )
+
+    try:
+        import yaml
+        with open(path) as f:
+            cfg = yaml.safe_load(f)
+    except Exception as e:
+        logger.warning("apply_config: failed to load %s: %s — using CLI args", config_path, e)
+        return
+
+    if not isinstance(cfg, dict):
+        logger.warning("apply_config: config is not a dict — using CLI args")
+        return
+
+    # Scheduled profiles (schedule section) are executed by
+    # core.execution.scheduled_runner, which reads the raw sections
+    # (schedule, recovery, isolation, validity, baseline) from here.
+    args.profile_cfg = cfg
+
+    _apply_study_section(args, cfg.get("study", {}))        # sets experiment_type first
+    _apply_execution_section(args, cfg.get("execution", {}))
+    _apply_retry_section(args, cfg.get("retry_policy", {}))
+    _apply_recovery_section(args, cfg.get("recovery_policy", {}))
+    _apply_tasks_section(args, cfg.get("tasks", []))
+    _apply_providers_section(args, cfg.get("providers", []))
+    _apply_failure_injection_section(args, cfg.get("failure_injection", {}))  # reads experiment_type after study
+
+    # A5: retry_policies list — multiple policies on same workload
+    retry_policies = cfg.get("retry_policies", None)
+    if retry_policies:
+        args.retry_policies = retry_policies
+
+    # B3: serving engine config — passed to EngineBackedCollector at startup.
+    serving_engine = cfg.get("serving_engine", None)
+    if serving_engine:
+        args.serving_engine = serving_engine
+
+    # Quality gate (39.5a): controls LLM judge and OutputQualityExtension.persist().
+    # Cheap local scorers (exact_match, numeric, structural, semantic) run always
+    # per task expectation block regardless of this flag.
+    # Precedence: CLI --quality-enabled > YAML quality.enabled > default false.
+    # If CLI already set quality_enabled=True (store_true), do not overwrite it.
+    if not getattr(args, "quality_enabled", False):
+        quality = cfg.get("quality") or {}
+        if quality:
+            args.quality_enabled = bool(quality.get("enabled", False))
+            logger.debug("apply_config: quality.enabled = %s (from YAML)", args.quality_enabled)
+        else:
+            args.quality_enabled = False
+            logger.debug("apply_config: quality.enabled = False (default)")
+    else:
+        logger.debug("apply_config: quality.enabled = True (CLI override)")
+
+def _apply_failure_injection_section(args, fi: dict) -> None:
+    """
+    Build FailureInjector from failure_injection YAML section and store on args.
+ 
+    FailureInjector is only active when enabled=true AND experiment_type=failure_injection.
+    Storing on args allows test_harness and run_experiment to pass it into execute_goal()
+    without reading YAML directly in entry points.
+ 
+    Args:
+        args: argparse.Namespace — mutated in place.
+        fi:   failure_injection section dict from YAML.
+    """
+    if not fi.get("enabled", False):
+        # Injection disabled — store None so callers can check cheaply
+        args.failure_injector = None
+        return
+ 
+    try:
+        from core.injection.scenario_loader import build_injector
+        experiment_type = getattr(args, "experiment_type", "normal")
+        # build_injector routes mode=scenario to ScenarioInjector,
+        # all other modes to existing FailureInjector (backward compat).
+        args.failure_injector = build_injector(fi, experiment_type)
+        if args.failure_injector is not None:
+            logger.info(
+                "_apply_failure_injection_section: injector active "
+                "mode=%s experiment_type=%s",
+                fi.get("mode", "statistical"), experiment_type,
+            )
+    except Exception as e:
+        # Never block experiment startup over injector construction failure
+        logger.warning("_apply_failure_injection_section: failed to build injector: %s", e)
+        args.failure_injector = None
+# ── Section appliers ──────────────────────────────────────────────────────────
+
+def _apply_study_section(args, study: dict) -> None:
+    """
+    Override experiment identity args from study section.
+    Only overrides if key present in YAML — CLI defaults kept otherwise.
+    """
+    if "experiment_type" in study:
+        args.experiment_type = study["experiment_type"]
+        logger.debug("apply_config: experiment_type = %s", args.experiment_type)
+
+    if "experiment_goal" in study:
+        args.experiment_goal = study["experiment_goal"]
+
+    if "workflow_modes" in study:
+        # YAML carries a list — map to single workflow_mode arg
+        modes = study["workflow_modes"]
+        if not isinstance(modes, list) or not modes:
+            logger.warning("apply_config: workflow_modes must be a non-empty list — ignoring")
+        elif len(modes) == 1:
+            args.workflow_mode = modes[0]
+        else:
+            # Multiple modes → comparison experiment (both sides run)
+            args.workflow_mode = "comparison"
+        logger.debug("apply_config: workflow_mode = %s", getattr(args, "workflow_mode", None))
+    if "tasks" in study:
+        # Extract task IDs from list of dicts [{id: ...}] or plain strings
+        task_entries = study["tasks"]
+        ids = []
+        for t in task_entries:
+            if isinstance(t, dict):
+                ids.append(t["id"])
+            else:
+                ids.append(str(t))
+        if ids:
+            # task_id is the single-task CLI arg — set first task for single-task entry points
+            args.task_id = ids[0]
+            # task_ids carries full list — run_experiment.py and config-driven runs use this
+            args.task_ids = ids
+            logger.debug("apply_config: task_ids = %s", ids)
+
+
+def _apply_execution_section(args, execution: dict) -> None:
+    """
+    Override execution parameters from execution section.
+    repetitions and cool_down_seconds only — safety-critical params stay CLI-only.
+    """
+    if "repetitions" in execution and args.repetitions is None:
+        args.repetitions = int(execution["repetitions"])
+        logger.debug("apply_config: repetitions = %d", args.repetitions)
+
+        if "cool_down_seconds" in execution:
+            # cool_down vs cool-down naming varies across entry points — set both
+            val = int(execution["cool_down_seconds"])
+            args.cool_down = val
+            logger.debug("apply_config: cool_down = %d", val)
+        if "inter_task_cooldown_seconds" in execution:
+            # cooldown between tasks — prevents cloud provider rate limiting
+            args.inter_task_cooldown = int(execution["inter_task_cooldown_seconds"])
+            logger.debug("apply_config: inter_task_cooldown = %d", args.inter_task_cooldown)
+
+    if "save_db" in execution:
+        # YAML save_db:true mirrors --save-db CLI flag (store_true, default False)
+        args.save_db = bool(execution["save_db"])
+        logger.debug("apply_config: save_db = %s", args.save_db)
+
+def _apply_tasks_section(args, tasks: list) -> None:
+    """
+    Override task_id and task_ids from top-level tasks list in config.
+    tasks is a list of dicts [{id: ...}] or plain strings.
+    task_id set to first entry for single-task harness entry points.
+    task_ids carries full list for multi-task run_experiment.py.
+    """
+    if not tasks:
+        return
+    # "all" keyword — load every task from tasks.yaml
+    if tasks == "all" or tasks == ["all"]:
+        from core.utils.task_loader import load_tasks
+        ids = [t["id"] for t in load_tasks()]
+    else:
+        ids = []
+        for t in tasks:
+            if isinstance(t, dict):
+                ids.append(t["id"])
+            else:
+                ids.append(str(t))
+    if ids:
+        args.task_id  = ids[0]
+        args.task_ids = ids
+        logger.debug("apply_config: task_ids = %s", ids)
+        
+def _apply_providers_section(args, providers: list) -> None:
+    """
+    Override provider args from top-level providers list.
+    args.provider  = first entry (single-provider entry points).
+    args.providers = comma-separated all names so run_experiment.py
+                     multi-provider loop iterates every provider.
+    """
+    if not providers:
+        return
+    names = []
+    for p in providers:
+        entry = p if isinstance(p, dict) else {}
+        if "name" in entry:
+            names.append(entry["name"])
+    if not names:
+        return
+    args.provider = names[0]
+    logger.debug("apply_config: provider = %s", args.provider)
+    args.providers = ",".join(names)
+    logger.debug("apply_config: providers = %s", args.providers)
+    first = providers[0] if isinstance(providers[0], dict) else {}
+    if "model_id" in first:
+        args.model = first["model_id"]
+        logger.debug("apply_config: model = %s", args.model)
+
+def _apply_retry_section(args, retry: dict) -> None:
+    """
+    Override retry policy args from retry_policy section.
+    Stored on args for 8.5-B RetryCoordinator to consume.
+    No-op in 8.5-A — wired here so configs are forward compatible.
+    """
+    if "max_retries" in retry:
+        args.max_retries = int(retry["max_retries"])
+    if "backoff_seconds" in retry:
+        args.backoff_seconds = float(retry["backoff_seconds"])
+    if "name" in retry:
+        args.policy_name = str(retry["name"])
+    # YAML retry flags override DB policy values — stored on args for load_policy merge
+    if "retry_on_timeout" in retry:
+        args.retry_on_timeout = bool(retry["retry_on_timeout"])
+    if "retry_on_tool_error" in retry:
+        args.retry_on_tool_error = bool(retry["retry_on_tool_error"])
+    if "retry_on_api_error" in retry:
+        args.retry_on_api_error = bool(retry["retry_on_api_error"])
+    if "retry_on_wrong_answer" in retry:
+        args.retry_on_wrong_answer = bool(retry["retry_on_wrong_answer"])
+    # A4: EAR adapter selection — 'flat' (default, backward compat) or 'ear'
+    if "engine" in retry:
+        args.retry_engine = str(retry["engine"])
+    # A4: EAR policy name — must match ear_policy.policy_name in DB
+    if "ear_policy_name" in retry:
+        args.ear_policy_name = str(retry["ear_policy_name"])
+    # A4: optional per-goal energy budget in µJ
+    if "budget_uj" in retry:
+        args.budget_uj = float(retry["budget_uj"])
+
+
+def _apply_recovery_section(args, recovery: dict) -> None:
+    """
+    Parse recovery_policy section from experiment YAML.
+    B1: sets recovery_policy_strategy on args for execute_goal to consume.
+    """
+    if "strategy" in recovery:
+        args.recovery_policy_strategy = str(recovery["strategy"])
+
+

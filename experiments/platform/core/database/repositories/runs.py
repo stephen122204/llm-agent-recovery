@@ -1,0 +1,658 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+RUNS REPOSITORY – Handles insertion of run data and derived metrics
+================================================================================
+
+PURPOSE:
+    Contains all logic for inserting runs into the database, including:
+    - Extracting data from harness output
+    - Computing derived metrics (energy_per_instruction, thermal_delta, etc.)
+    - Computing cryptographic run state hash
+    - Inserting the main run record
+
+WHY THIS EXISTS:
+    - Separates run insertion logic from other database operations
+    - Makes the 80+ column insert manageable
+    - Centralizes derived metric calculations
+    - Part of splitting the god object manager.py
+
+AUTHOR: Deepak Panigrahy
+================================================================================
+"""
+
+import hashlib
+import sqlite3
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+from ..base import DatabaseError, DatabaseInterface
+
+
+class RunsRepository:
+    """
+    Repository for run-related database operations.
+
+    This class handles all insertions and queries related to runs,
+    including the complex 80+ column run table.
+    """
+
+    def __init__(self, db: DatabaseInterface):
+        """
+        Initialize with database adapter.
+
+        Args:
+            db: DatabaseInterface instance (SQLiteAdapter, etc.)
+        """
+        self.db = db
+
+    def _compute_run_state_hash(
+        self, run_data: Dict[str, Any], hw_id: Optional[int], baseline_id: Optional[str]
+    ) -> str:
+        """
+        Compute a cryptographic hash of the system state for reproducibility.
+
+        The hash includes:
+        - governor
+        - turbo_enabled
+        - hw_id (which encodes microcode, kernel, etc.)
+        - baseline_id
+
+        Args:
+            run_data: Dictionary containing run fields (ml_features)
+            hw_id: hardware_config primary key (or None)
+            baseline_id: idle_baselines primary key (or None)
+
+        Returns:
+            SHA‑256 hex digest string
+        """
+        state_str = (
+            f"{run_data.get('governor', '')}|"
+            f"{run_data.get('turbo_enabled', '')}|"
+            f"{hw_id}|"
+            f"{baseline_id}"
+        )
+        return hashlib.sha256(state_str.encode()).hexdigest()
+
+    def _extract_from_ml_features(self, ml: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract and compute all fields from ml_features dictionary.
+
+        Args:
+            ml: ml_features dictionary from harness output
+
+        Returns:
+            Dictionary with all fields ready for database insertion
+        """
+        # Energy values (convert J to µJ)
+        total_energy_j = ml.get("energy_j", 0)
+        total_energy_uj = int(total_energy_j * 1_000_000)
+
+        # Performance counters
+        instructions = ml.get("instructions", 0)
+        cycles = ml.get("cycles", 0)
+        total_tokens = ml.get("total_tokens")  # C2: unknown stays NULL
+
+        # Derived metrics
+        energy_per_instruction = (
+            (total_energy_j / instructions) if instructions else None
+        )
+        energy_per_cycle = (total_energy_j / cycles) if cycles else None
+        energy_per_token = (total_energy_j / total_tokens) if total_tokens else None
+        instructions_per_token = (instructions / total_tokens) if total_tokens else None
+
+        duration_sec = ml.get("duration_sec", 0)
+        energy_j = ml.get("energy_j", 0)
+        avg_power_watts = energy_j / duration_sec if duration_sec > 0 else 0
+
+        # Thermal delta
+        start_temp = ml.get("start_temp_c")
+        max_temp = ml.get("max_temp_c")
+        thermal_delta = (
+            (max_temp - start_temp)
+            if (start_temp is not None and max_temp is not None)
+            else None
+        )
+
+        return {
+            # Core fields
+            "run_number": ml.get("run_number"),
+            "duration_ms": ml.get("duration_ms", 0),
+            "total_energy_j": total_energy_j,
+            "total_energy_uj": total_energy_uj,
+            'avg_power_watts': avg_power_watts,
+            # Performance counters
+            "instructions": instructions,
+            "cycles": cycles,
+            "ipc": ml.get("ipc", 0),
+            "cache_misses": ml.get("cache_misses", 0),
+            "cache_references": ml.get("cache_references", 0),
+            "cache_miss_rate": ml.get("cache_miss_rate", 0),
+            "page_faults": ml.get("page_faults", 0),
+            "major_page_faults": ml.get("major_page_faults", 0),
+            "minor_page_faults": ml.get("minor_page_faults", 0),
+            # Scheduler
+            "context_switches_voluntary": ml.get("context_switches_voluntary", 0),
+            "context_switches_involuntary": ml.get("context_switches_involuntary", 0),
+            "total_context_switches": ml.get("total_context_switches", 0),
+            "thread_migrations": ml.get("thread_migrations", 0),
+            "run_queue_length": ml.get("run_queue_length", 0),
+            "kernel_time_ms": ml.get("kernel_time_ms", 0),
+            "user_time_ms": ml.get("user_time_ms", 0),
+            # Frequency
+            "frequency_mhz": ml.get("frequency_mhz", 0),
+            "ring_bus_freq_mhz": ml.get("ring_bus_freq_mhz", 0),
+            # Thermal
+            "package_temp_celsius": ml.get("package_temp_celsius"),
+            "baseline_temp_celsius": ml.get("baseline_temp_celsius"),
+            "start_temp_c": ml.get("start_temp_c", 0.0),
+            "max_temp_c": ml.get("max_temp_c", 0.0),
+            "min_temp_c": ml.get("min_temp_c", 0.0),
+            "thermal_delta_c": ml.get("thermal_delta_c", 0.0),
+            "thermal_during_experiment": ml.get("thermal_during_experiment", False),
+            "thermal_now_active": ml.get("thermal_now_active", False),
+            "thermal_since_boot": ml.get("thermal_since_boot", False),
+            "experiment_valid": ml.get("experiment_valid", True),
+            # C-states
+            "c2_time_seconds": ml.get("c2_time_seconds", 0),
+            "c3_time_seconds": ml.get("c3_time_seconds", 0),
+            "c6_time_seconds": ml.get("c6_time_seconds", 0),
+            "c7_time_seconds": ml.get("c7_time_seconds", 0),
+            # ... swap fields ...
+            "swap_total_mb": ml.get("swap_total_mb"),
+            "swap_end_free_mb": ml.get("swap_end_free_mb"),
+            "swap_start_used_mb": ml.get("swap_start_used_mb"),
+            "swap_end_used_mb": ml.get("swap_end_used_mb"),
+            "swap_start_cached_mb": ml.get("swap_start_cached_mb"),
+            "swap_end_cached_mb": ml.get("swap_end_cached_mb"),
+            "swap_end_percent": ml.get("swap_end_percent"),
+            # MSR
+            "wakeup_latency_us": ml.get("wakeup_latency_us", 0),
+            "interrupt_rate": ml.get("interrupt_rate", 0),
+            "thermal_throttle_flag": ml.get("thermal_throttle_flag", 0),
+            # Memory
+            "rss_memory_mb": ml.get("rss_memory_mb", 0),
+            "vms_memory_mb": ml.get("vms_memory_mb", 0),
+            # Tokens
+            "total_tokens": total_tokens,
+            "prompt_tokens": ml.get("prompt_tokens"),
+            "completion_tokens": ml.get("completion_tokens"),
+            # Network
+            "dns_latency_ms": ml.get("dns_latency_ms", 0),
+            "api_latency_ms": ml.get("api_latency_ms", 0),
+            "compute_time_ms": ml.get("compute_time_ms", 0),
+            # System state
+            "baseline_id": ml.get("baseline_id"),
+            "governor": ml.get("governor", "unknown"),
+            "turbo_enabled": ml.get("turbo_enabled", False),
+            "is_cold_start": ml.get("is_cold_start", False),
+            "background_cpu_percent": ml.get("background_cpu_percent", 0),
+            "process_count": ml.get("process_count", 0),
+            "cpu_active_ratio": ml.get("cpu_active_ratio"),
+            # Agentic-specific
+            "planning_time_ms": ml.get("planning_time_ms"),
+            "execution_time_ms": ml.get("execution_time_ms"),
+            "synthesis_time_ms": ml.get("synthesis_time_ms"),
+            "phase_planning_ratio": ml.get("phase_planning_ratio"),
+            "phase_execution_ratio": ml.get("phase_execution_ratio"),
+            "phase_synthesis_ratio": ml.get("phase_synthesis_ratio"),
+            "llm_calls": ml.get("llm_calls"),
+            "tool_calls": ml.get("tool_calls"),
+            "tools_used": ml.get("tools_used"),
+            "steps": ml.get("steps"),
+            "avg_step_time_ms": ml.get("avg_step_time_ms"),
+            "complexity_level": ml.get("complexity_level"),
+            "complexity_score": ml.get("complexity_score"),
+            'orchestration_cpu_ms': ml.get('orchestration_cpu_ms', 0),
+            # Derived metrics
+            "energy_per_instruction": energy_per_instruction,
+            "energy_per_cycle": energy_per_cycle,
+            "energy_per_token": energy_per_token,
+            "instructions_per_token": instructions_per_token,
+            "interrupts_per_second": ml.get("interrupt_rate", 0),
+        }
+
+    def insert_run(
+        self, exp_id: int, hw_id: Optional[int], run_data: Dict[str, Any]
+    ) -> int:
+        """
+        Insert a single run with all its metrics.
+
+        Args:
+            exp_id: Foreign key to experiments table
+            hw_id: Foreign key to hardware_config (or None)
+            run_data: Dictionary containing all data for one run
+
+        Returns:
+            run_id of the newly inserted run
+        """
+        if not hasattr(self.db, "conn") or self.db.conn is None:
+            self.db.connect()
+
+        # Extract ml_features
+        ml = run_data.get("ml_features", {})
+        sus = run_data.get("sustainability", {})
+
+        pkg_raw_uj = ml.get("pkg_energy_uj", 0)
+        core_raw_uj = ml.get("core_energy_uj", 0)
+        uncore_raw_uj = ml.get("uncore_energy_uj", 0)
+        dram_raw_uj = ml.get("dram_energy_uj", 0)
+        baseline_energy_uj = ml.get("idle_energy_uj", 0)
+
+        import logging as _logging  # repository has no module logger
+        _logging.getLogger(__name__).debug(
+            "pkg_raw_uj %s, baseline_energy_uj %s, dynamic %s",
+            pkg_raw_uj, baseline_energy_uj, max(pkg_raw_uj - baseline_energy_uj, 0),
+        )
+
+        # Extract and compute fields
+        fields = self._extract_from_ml_features(ml)
+
+        # ====================================================================
+        # Get timestamps from ml_features (captured per run during execution)
+        # ====================================================================
+        start_time_ns = ml.get("start_time_ns")
+        end_time_ns = ml.get("end_time_ns")
+        duration_ns = int(fields["duration_ms"] * 1_000_000)
+        # v9: task/framework duration in nanoseconds (harness provides seconds)
+        _task_dur_sec  = ml.get("task_duration_sec") or fields.get("task_duration_sec")
+        _fw_dur_sec    = ml.get("framework_overhead_sec") or fields.get("framework_overhead_sec")
+        _total_dur_sec = ml.get("total_run_duration_sec") or fields.get("total_run_duration_sec")
+        _pre_dur_sec   = ml.get("pre_task_duration_sec") or fields.get("pre_task_duration_sec")
+        task_duration_ns      = int(_task_dur_sec  * 1e9) if _task_dur_sec  else None
+        framework_overhead_ns = int(_fw_dur_sec    * 1e9) if _fw_dur_sec    else None
+        total_run_duration_ns = int(_total_dur_sec * 1e9) if _total_dur_sec else None
+        pre_task_duration_ns  = int(_pre_dur_sec   * 1e9) if _pre_dur_sec   else None
+        duration_includes_overhead = int(ml.get("duration_includes_overhead",
+                                         fields.get("duration_includes_overhead", 1)))
+        pre_task_energy_uj    = ml.get("pre_task_energy_uj")
+        _post_dur_sec         = ml.get("post_task_duration_sec") or fields.get("post_task_duration_sec")
+        post_task_duration_ns = int(_post_dur_sec * 1e9) if _post_dur_sec else None
+        _rapl_before          = ml.get("rapl_before_pretask")
+        _rapl_after           = ml.get("rapl_after_task")
+        # NormalizedEnergyReading path (Phase 2): use .pkg_uj directly
+        # Legacy dict path (backward compat): fall back to key lookup chain
+        if hasattr(_rapl_before, 'pkg_uj'):
+            rapl_before_pretask_uj = _rapl_before.pkg_uj
+        else:
+            _rapl_before = _rapl_before or {}
+            rapl_before_pretask_uj = (_rapl_before.get("package-0") or _rapl_before.get("package")
+                                      or _rapl_before.get("pkg") or _rapl_before.get("cpu"))
+        # F3: t0 anchor
+        _rapl_t0 = ml.get("rapl_at_t0") or {}
+        rapl_at_t0_uj = (_rapl_t0.get("package-0") or _rapl_t0.get("package")
+                         or _rapl_t0.get("pkg") or _rapl_t0.get("cpu")) if _rapl_t0 else None
+        if hasattr(_rapl_after, 'pkg_uj'):
+            rapl_after_task_uj = _rapl_after.pkg_uj
+        else:
+            _rapl_after = _rapl_after or {}
+            rapl_after_task_uj = (_rapl_after.get("package-0") or _rapl_after.get("package")
+                                  or _rapl_after.get("pkg") or _rapl_after.get("cpu"))
+
+        # Fallback to old method if per-run timestamps missing
+
+        # Fallback to old method if per-run timestamps missing
+        if start_time_ns is None or end_time_ns is None:
+            harness_ts_str = run_data.get(
+                "harness_timestamp", datetime.now().isoformat()
+            )
+            try:
+                dt = datetime.fromisoformat(harness_ts_str)
+                start_time_s = dt.timestamp()
+            except Exception:
+                start_time_s = datetime.now().timestamp()
+            start_time_ns = int(start_time_s * 1_000_000_000)
+            end_time_ns = start_time_ns + duration_ns
+
+        # Sustainability metrics
+        carbon_g = None
+        water_ml = None
+        methane_mg = None
+        if sus:
+            carbon_g = sus.get("carbon", {}).get("grams")
+            water_ml = sus.get("water", {}).get("milliliters")
+            methane_mg = sus.get("methane", {}).get("grams")
+
+        # Run state hash
+        baseline_id = run_data.get("baseline_id")
+        if baseline_id is None and "ml_features" in run_data:
+            baseline_id = run_data["ml_features"].get("baseline_id")
+        run_state_hash = self._compute_run_state_hash(ml, hw_id, baseline_id)
+
+        # Insert the run
+        query = """
+            INSERT INTO runs (
+                exp_id, hw_id, baseline_id, run_number, workflow_type,
+                start_time_ns, end_time_ns, duration_ns,
+                total_energy_uj, dynamic_energy_uj, baseline_energy_uj, avg_power_watts,
+                pkg_energy_uj, core_energy_uj, uncore_energy_uj, dram_energy_uj,
+                instructions, cycles, ipc, cache_misses, cache_references, cache_miss_rate,
+                page_faults, major_page_faults, minor_page_faults,
+                context_switches_voluntary, context_switches_involuntary, total_context_switches,
+                thread_migrations, run_queue_length, kernel_time_ms, user_time_ms,
+                frequency_mhz, ring_bus_freq_mhz,
+                package_temp_celsius, baseline_temp_celsius, start_temp_c, max_temp_c, min_temp_c, thermal_delta_c,
+                thermal_during_experiment, thermal_now_active, thermal_since_boot, experiment_valid,
+                c2_time_seconds, c3_time_seconds, c6_time_seconds, c7_time_seconds,
+                swap_total_mb, swap_end_free_mb, swap_start_used_mb,
+                swap_end_used_mb, swap_start_cached_mb, swap_end_cached_mb, swap_end_percent,
+                wakeup_latency_us, interrupt_rate, thermal_throttle_flag,
+                rss_memory_mb, vms_memory_mb,
+                total_tokens, prompt_tokens, completion_tokens,
+                dns_latency_ms, api_latency_ms, compute_time_ms,
+                governor, turbo_enabled, is_cold_start, background_cpu_percent, process_count, cpu_active_ratio,
+                planning_time_ms, execution_time_ms, synthesis_time_ms,
+                phase_planning_ratio, phase_execution_ratio, phase_synthesis_ratio,
+                llm_calls, tool_calls, tools_used, steps, avg_step_time_ms, orchestration_cpu_ms,
+                complexity_level, complexity_score,
+                carbon_g, water_ml, methane_mg,
+                energy_per_instruction, energy_per_cycle, energy_per_token,
+                instructions_per_token, interrupts_per_second,bytes_sent, bytes_recv, tcp_retransmits,
+                run_state_hash,pid, cpu_fraction, attributed_energy_uj, energy_measurement_mode,
+                planning_energy_uj, execution_energy_uj, synthesis_energy_uj,
+                l1d_cache_misses_total, l2_cache_misses_total,l3_cache_hits_total,
+                l3_cache_misses_total, disk_read_bytes_total, disk_write_bytes_total,
+                voltage_vcore_avg,
+                task_duration_ns, framework_overhead_ns, total_run_duration_ns,
+                duration_includes_overhead, pre_task_energy_uj, pre_task_duration_ns,
+                rapl_before_pretask_uj, rapl_at_t0_uj, rapl_after_task_uj,
+                post_task_duration_ns, post_task_energy_uj,
+                framework_overhead_energy_uj,gpu_total_energy_uj, gpu_baseline_energy_uj,
+                gpu_dynamic_energy_uj, gpu_pct_of_pkg,gpu_dynamic_method, gpu_idle_power_w_used,
+                measurement_log_level, measurement_log_config_hash, observability_overflow
+
+            ) VALUES (
+                ?, ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, 
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, 
+                ?, ?, ?, 
+                ?, ?, ?, 
+                ?, ?, ?, ?, ?,
+                ? , ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ? , ?, ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?
+            )
+        """
+
+        params = (
+            exp_id,
+            hw_id,
+            baseline_id,
+            fields["run_number"],
+            ml.get("workflow_type", "unknown"),
+            start_time_ns,
+            end_time_ns,
+            duration_ns,
+            pkg_raw_uj,
+            max(pkg_raw_uj - baseline_energy_uj, 0),
+            baseline_energy_uj,
+            fields.get("avg_power_watts", 0),
+            pkg_raw_uj,
+            core_raw_uj,
+            uncore_raw_uj,
+            dram_raw_uj,
+            fields["instructions"],
+            fields["cycles"],
+            fields["ipc"],
+            fields["cache_misses"],
+            fields["cache_references"],
+            fields["cache_miss_rate"],
+            fields["page_faults"],
+            fields["major_page_faults"],
+            fields["minor_page_faults"],
+            fields["context_switches_voluntary"],
+            fields["context_switches_involuntary"],
+            fields["total_context_switches"],
+            fields["thread_migrations"],
+            fields["run_queue_length"],
+            fields["kernel_time_ms"],
+            fields["user_time_ms"],
+            fields["frequency_mhz"],
+            fields["ring_bus_freq_mhz"],
+            fields["package_temp_celsius"],
+            fields["baseline_temp_celsius"],
+            fields["start_temp_c"],
+            fields["max_temp_c"],
+            fields["min_temp_c"],
+            fields["thermal_delta_c"],
+            fields["thermal_during_experiment"],
+            fields["thermal_now_active"],
+            fields["thermal_since_boot"],
+            fields["experiment_valid"],
+            fields["c2_time_seconds"],
+            fields["c3_time_seconds"],
+            fields["c6_time_seconds"],
+            fields["c7_time_seconds"],
+            fields.get("swap_total_mb"),
+            fields.get("swap_end_free_mb"),
+            fields.get("swap_start_used_mb"),
+            fields.get("swap_end_used_mb"),
+            fields.get("swap_start_cached_mb"),
+            fields.get("swap_end_cached_mb"),
+            fields.get("swap_end_percent"),
+            fields["wakeup_latency_us"],
+            fields["interrupt_rate"],
+            fields["thermal_throttle_flag"],
+            fields["rss_memory_mb"],
+            fields["vms_memory_mb"],
+            fields["total_tokens"],
+            fields["prompt_tokens"],
+            fields["completion_tokens"],
+            fields["dns_latency_ms"],
+            fields["api_latency_ms"],
+            fields["compute_time_ms"],
+            fields["governor"],
+            fields["turbo_enabled"],
+            fields["is_cold_start"],
+            fields["background_cpu_percent"],
+            fields["process_count"],
+            fields.get("cpu_active_ratio"),
+            fields["planning_time_ms"],
+            fields["execution_time_ms"],
+            fields["synthesis_time_ms"],
+            fields["phase_planning_ratio"],
+            fields["phase_execution_ratio"],
+            fields["phase_synthesis_ratio"],
+            fields["llm_calls"],
+            fields["tool_calls"],
+            fields["tools_used"],
+            fields["steps"],
+            fields["avg_step_time_ms"],
+            fields["orchestration_cpu_ms"],
+            fields["complexity_level"],
+            fields["complexity_score"],
+            carbon_g,
+            water_ml,
+            methane_mg,
+            fields["energy_per_instruction"],
+            fields["energy_per_cycle"],
+            fields["energy_per_token"],
+            fields["instructions_per_token"],
+            fields["interrupts_per_second"],
+            ml.get("bytes_sent", 0),
+            ml.get("bytes_recv", 0),
+            ml.get("tcp_retransmits"),
+            run_state_hash,
+            ml.get("pid"),                                    # SYSTEM — PID of workload process
+            ml.get("cpu_fraction"),                           # CALCULATED — workload/total ticks
+            ml.get("attributed_energy_uj"),                   # CALCULATED — cpu_fraction × dynamic_energy_uj
+            ml.get("reader_mode"),
+            None,  # planning_energy_uj — ETL populated
+            None,  # execution_energy_uj — ETL populated
+            None,  # synthesis_energy_uj — ETL populated
+            None,  # l1d_cache_misses_total — ETL populated
+            None,  # l2_cache_misses_total — ETL populated
+            None,  # l3_cache_hits_total — ETL populated
+            None,  # l3_cache_misses_total — ETL populated
+            None,  # disk_read_bytes_total — ETL populated
+            None,  # disk_write_bytes_total — ETL populated
+            None,  # voltage_vcore_avg — ETL populated 
+            # v9: task/framework duration separation
+            task_duration_ns,               # task only — canonical denominator
+            framework_overhead_ns,          # A-LEMS post-processing cost
+            total_run_duration_ns,          # full wall clock (legacy compat)
+            duration_includes_overhead,     # 0=corrected, 1=historical
+            pre_task_energy_uj,             # diagnostic — NOT in attribution
+            pre_task_duration_ns,           # pre-task context reads time  
+            rapl_before_pretask_uj,             # raw RAPL pkg at t_before
+            rapl_at_t0_uj,                      # raw RAPL pkg at t0 — F3 anchor
+            rapl_after_task_uj,                 # raw RAPL pkg at t1
+            post_task_duration_ns,              # t2 - t1
+            None,   # post_task_energy_uj — ETL owned by fix_run_with_pretask()
+            None,   # framework_overhead_energy_uj — ETL owned by fix_run_with_pretask()  
+            ml.get("gpu_total_energy_uj"),      # MEASURED via MSR 0x641
+            ml.get("gpu_baseline_energy_uj"),   # CALCULATED — idle rate * duration
+            ml.get("gpu_dynamic_energy_uj"),    # CALCULATED — run-local adaptive, primary; external baseline, fallback
+            ml.get("gpu_pct_of_pkg"),
+            ml.get("gpu_dynamic_method"),       # provenance: RUN_LOCAL_IDLE or EXTERNAL_IDLE_BASELINE
+            ml.get("gpu_idle_power_w_used"),    # provenance: actual idle power value used, watts                                         
+            ml.get("measurement_log_level"),        # 39.5.2b: level inside the gate (INV-P1)
+            ml.get("measurement_log_config_hash"),  # 39.5.2b: effective logging config hash
+            ml.get("observability_overflow"),       # 39.5.2b: NULL not recorded, 0 none, 1 overflow
+        )
+
+        try:
+            # Remove the transaction wrapper - let the caller control transactions
+            cursor = self.db.conn.execute(query, params)
+            return cursor.lastrowid
+        except sqlite3.IntegrityError as e:
+            # Print detailed debug info
+            import logging as _logging
+            _fk = _logging.getLogger(__name__)
+            _fk.error(
+                "foreign key error: %s (exp_id %r, hw_id %r, baseline_id %r)",
+                e, exp_id, hw_id, baseline_id,
+            )
+
+            # Verify each foreign key exists
+            try:
+                exp_check = self.db.execute(
+                    "SELECT COUNT(*) as count FROM experiments WHERE exp_id = ?",
+                    (exp_id,),
+                )
+                _fk.error("experiments rows for exp_id %s: %s", exp_id, exp_check[0]["count"])
+            except Exception as ex:
+                _fk.error("failed to check experiments: %s", ex)
+
+            try:
+                hw_check = self.db.execute(
+                    "SELECT COUNT(*) as count FROM hardware_config WHERE hw_id = ?",
+                    (hw_id,),
+                )
+                _fk.error("hardware_config rows for hw_id %s: %s", hw_id, hw_check[0]["count"])
+            except Exception as ex:
+                _fk.error("failed to check hardware: %s", ex)
+
+            if baseline_id:
+                try:
+                    bl_check = self.db.execute(
+                        "SELECT COUNT(*) as count FROM idle_baselines WHERE baseline_id = ?",
+                        (baseline_id,),
+                    )
+                    _fk.error("idle_baselines rows for baseline_id %s: %s", baseline_id, bl_check[0]["count"])
+                except Exception as ex:
+                    _fk.error("failed to check baseline: %s", ex)
+            else:
+                _fk.error("baseline_id is None (allowed)")
+
+            # Re-raise the original error
+            raise
+
+    def update_energy_sample_coverage(self, run_id: int, sample_interval_ns: int = 200_000_000) -> None:
+        """Compute and update energy_sample_coverage_pct from energy_sample_domains.
+
+        Called after run INSERT on platforms where coverage is not computed
+        during the run (e.g. Apple IOKit). Platform-agnostic: counts rows
+        in energy_sample_domains and divides by expected sample count based
+        on task_duration_ns and sample_interval_ns.
+
+        Args:
+            run_id: run to update
+            sample_interval_ns: sampling interval in ns (default 200ms for IOKit)
+        """
+        cur = self.db.conn.execute(
+            "SELECT task_duration_ns FROM runs WHERE run_id = ?", (run_id,)
+        )
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return
+        task_duration_ns = row[0]
+        cur = self.db.conn.execute(
+            "SELECT COUNT(DISTINCT sample_id) FROM energy_sample_domains WHERE run_id = ?",
+            (run_id,)
+        )
+        count_row = cur.fetchone()
+        sample_count = count_row[0] if count_row else 0
+        if sample_count == 0 or task_duration_ns == 0:
+            return
+        expected = task_duration_ns / sample_interval_ns
+        coverage_pct = min(sample_count / expected * 100.0, 100.0)
+        self.db.execute(
+            "UPDATE runs SET energy_sample_coverage_pct = ? WHERE run_id = ?",
+            (round(coverage_pct, 2), run_id)
+        )
+
+    def update_run_stats(self, run_id: int, stats: Dict) -> None:
+        """Update run with aggregated statistics from samples."""
+        # Round temperatures to 2 decimal places — applies on all platforms.
+        # Full float precision (e.g. 58.2857142857143) is noise not signal.
+        def _r(v, n=2):
+            # type: (object, int) -> object
+            return round(float(v), n) if v is not None and v != 0 else v
+
+        self.db.execute(
+            """
+            UPDATE runs SET
+                cpu_busy_mhz              = ?,
+                cpu_avg_mhz               = ?,
+                frequency_mhz             = ?,
+                package_temp_celsius      = ?,
+                max_temp_c                = ?,
+                min_temp_c                = ?,
+                interrupt_rate            = ?,
+                avg_task_power_watts      = ?,
+                energy_sample_coverage_pct= ?,
+                framework_overhead_energy_uj = ?,
+                gpu_attribution_method    = ?
+            WHERE run_id = ?
+        """,
+            (
+                stats.get("cpu_busy_mhz", 0),
+                stats.get("cpu_avg_mhz", 0),
+                stats.get("cpu_avg_mhz", 0),
+                _r(stats.get("package_temp_celsius", 0)),
+                _r(stats.get("max_temp_c", 0)),
+                _r(stats.get("min_temp_c", 0)),
+                stats.get("interrupt_rate", 0),
+                stats.get("avg_task_power_watts"),
+                stats.get("energy_sample_coverage_pct"),
+                stats.get("framework_overhead_energy_uj"),
+                stats.get("gpu_attribution_method"),
+                run_id,
+            ),
+        )

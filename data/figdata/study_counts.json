@@ -1,0 +1,50 @@
+{
+ "P": {
+  "tasks": 10,
+  "valid": 350
+ },
+ "M1": {
+  "tasks": 30,
+  "valid": 1050
+ },
+ "M2": {
+  "tasks": 30,
+  "valid": 960
+ },
+ "C1": {
+  "tasks": 29,
+  "valid": 510
+ },
+ "C2": {
+  "tasks": 26,
+  "valid": 239
+ },
+ "O": {
+  "tasks": 28,
+  "valid": 666
+ },
+ "Mid": {
+  "tasks": 30,
+  "valid": 240
+ },
+ "Mis": {
+  "tasks": 30,
+  "valid": 252
+ },
+ "Gpt": {
+  "tasks": 30,
+  "valid": 348
+ },
+ "T": {
+  "tasks": 10,
+  "valid": 240
+ },
+ "Sw2": {
+  "tasks": 12,
+  "valid": 120
+ },
+ "Sw1": {
+  "tasks": 12,
+  "valid": 120
+ }
+}

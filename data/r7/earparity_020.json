@@ -1,0 +1,19 @@
+{
+ "earParityEar": {
+  "k": 111,
+  "n": 111
+ },
+ "earParityTokenRule": {
+  "k": 111,
+  "n": 111
+ },
+ "earParityThompson": {
+  "k": 111,
+  "n": 111
+ },
+ "decisions_sha256": "3537f813842af1a4387a46c6c24499cfe2aa1204f5dab21d160aef5613057c5d",
+ "params_sha256": "97ecd54a677f55d06967678fe6def2f318524c4713f97a0b9592de445a97076b",
+ "selector_sha256": "179b83863744f584ec6bf4d28153b1ecb85c05bb985d672e81aeabb44507bbc3",
+ "source_commit": "1e74bff",
+ "scope": "the 111 E3 token_rule decisions: json_parse 56, tool_error 55; v2 changes the token fit only for silent_detected and unseen classes"
+}

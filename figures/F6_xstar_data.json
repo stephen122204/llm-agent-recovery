@@ -1,0 +1,50 @@
+{
+ "label": "OFFLINE CALIBRATED RULE (R5, data_tag e1_e1b_e2)",
+ "classes": {
+  "rate_limit": {
+   "x_star_calls": 3.9000000000000004,
+   "ci": [
+    1.6950000000000003,
+    6.300000000000001
+   ],
+   "work_range": [
+    3.0,
+    22.0
+   ]
+  },
+  "tool_error": {
+   "x_star_calls": 5.7,
+   "ci": [
+    2.4475000000000002,
+    9.452499999999997
+   ],
+   "work_range": [
+    3.0,
+    21.0
+   ]
+  },
+  "json_parse": {
+   "x_star_calls": 7.5,
+   "ci": [
+    4.7,
+    10.8
+   ],
+   "work_range": [
+    3.0,
+    22.0
+   ]
+  },
+  "timeout": {
+   "x_star_calls": 8.1,
+   "ci": [
+    3.5475000000000003,
+    13.952499999999997
+   ],
+   "work_range": [
+    3.0,
+    21.0
+   ]
+  }
+ },
+ "demo": false
+}

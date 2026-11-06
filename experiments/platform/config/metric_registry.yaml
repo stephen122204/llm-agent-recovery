@@ -1,0 +1,273 @@
+# config/metric_registry.yaml
+# Composable metric engine.
+# Two types:
+#   sql: → executes inline SQL, returns rows with 'value' column
+#   depends_on + formula: → computes from other metrics
+# All metrics visible in UI automatically. Zero code change to add new metric.
+
+version: "2.0"
+
+metrics:
+
+  # ── MEASURED: Raw silicon energy ──────────────────────────────────────────
+
+  - id: pkg_energy_j
+    description: "Total CPU package energy — read directly from RAPL hardware register"
+    provenance: MEASURED
+    layer: silicon
+    unit: J
+    type: aggregate
+    sql: |
+      SELECT AVG(pkg_energy_uj) / 1e6 AS value
+      FROM runs
+      WHERE (:run_id IS NULL OR run_id = :run_id)
+        AND (:workflow IS NULL OR workflow_type = :workflow)
+        AND pkg_energy_uj > 0
+    visible_in: [workbench, showcase]
+    significance: supporting
+
+  - id: core_energy_j
+    description: "CPU core energy — pure compute work, excludes uncore and DRAM"
+    provenance: MEASURED
+    layer: silicon
+    unit: J
+    type: aggregate
+    sql: |
+      SELECT AVG(core_energy_uj) / 1e6 AS value
+      FROM runs
+      WHERE (:run_id IS NULL OR run_id = :run_id)
+        AND (:workflow IS NULL OR workflow_type = :workflow)
+        AND core_energy_uj > 0
+    visible_in: [workbench, showcase]
+    significance: supporting
+
+  - id: duration_s
+    description: "Run wall-clock duration in seconds"
+    provenance: MEASURED
+    layer: silicon
+    unit: s
+    type: aggregate
+    sql: |
+      SELECT AVG(duration_ns) / 1e9 AS value
+      FROM runs
+      WHERE (:run_id IS NULL OR run_id = :run_id)
+        AND (:workflow IS NULL OR workflow_type = :workflow)
+        AND duration_ns > 0
+    visible_in: [workbench]
+    significance: supporting
+
+  - id: total_tokens
+    description: "Total tokens (prompt + completion) — 74% coverage"
+    provenance: MEASURED
+    layer: orchestration
+    unit: tokens
+    type: aggregate
+    sql: |
+      SELECT AVG(total_tokens) AS value
+      FROM runs
+      WHERE (:run_id IS NULL OR run_id = :run_id)
+        AND (:workflow IS NULL OR workflow_type = :workflow)
+        AND total_tokens > 0
+    visible_in: [workbench]
+    significance: supporting
+
+  - id: llm_calls
+    description: "Number of LLM API calls — agentic only"
+    provenance: MEASURED
+    layer: orchestration
+    unit: calls
+    type: aggregate
+    sql: |
+      SELECT AVG(llm_calls) AS value
+      FROM runs
+      WHERE (:run_id IS NULL OR run_id = :run_id)
+        AND workflow_type = 'agentic'
+        AND llm_calls > 0
+    visible_in: [workbench]
+    significance: supporting
+
+  - id: avg_ipc
+    description: "Instructions per cycle — hardware performance counter"
+    provenance: MEASURED
+    layer: silicon
+    unit: instr/cycle
+    type: aggregate
+    sql: |
+      SELECT AVG(ipc) AS value
+      FROM runs
+      WHERE (:run_id IS NULL OR run_id = :run_id)
+        AND ipc > 0
+    visible_in: [workbench, showcase]
+    significance: supporting
+
+  # ── CALCULATED: Derived from measured values ──────────────────────────────
+
+  - id: avg_power_w
+    description: "Real average power = energy / time. Not the stored avg_power_watts which is unreliable."
+    provenance: CALCULATED
+    layer: silicon
+    unit: W
+    type: derived
+    depends_on: [pkg_energy_j, duration_s]
+    formula: pkg_energy_j / duration_s
+    formula_latex: "P = \\frac{E_{pkg}}{t}"
+    visible_in: [workbench, showcase]
+    significance: supporting
+
+  - id: energy_per_token_uj
+    description: "Dynamic energy cost per output token"
+    provenance: CALCULATED
+    layer: orchestration
+    unit: µJ/token
+    type: derived
+    depends_on: [pkg_energy_j, total_tokens]
+    formula: (pkg_energy_j * 1e6) / total_tokens
+    formula_latex: "E_{token} = \\frac{E_{pkg} \\times 10^6}{N_{tokens}}"
+    visible_in: [workbench, showcase, commons]
+    significance: thesis_core
+
+  - id: energy_per_llm_call_j
+    description: "Energy cost per LLM API call — agentic orchestration efficiency"
+    provenance: CALCULATED
+    layer: orchestration
+    unit: J/call
+    type: derived
+    depends_on: [pkg_energy_j, llm_calls]
+    formula: pkg_energy_j / llm_calls
+    formula_latex: "E_{call} = \\frac{E_{pkg}}{N_{calls}}"
+    visible_in: [workbench, showcase]
+    significance: thesis_core
+
+  - id: core_share_pct
+    description: "Fraction of package energy used by CPU cores — compute efficiency"
+    provenance: CALCULATED
+    layer: silicon
+    unit: "%"
+    type: aggregate
+    sql: |
+      SELECT AVG(core_energy_uj * 100.0 / NULLIF(pkg_energy_uj, 0)) AS value
+      FROM runs
+      WHERE (:run_id IS NULL OR run_id = :run_id)
+        AND pkg_energy_uj > 0
+        AND core_energy_uj > 0
+    formula_latex: "S_{core} = \\frac{E_{core}}{E_{pkg}} \\times 100"
+    visible_in: [workbench, showcase]
+    significance: supporting
+
+  - id: tax_multiplier
+    description: "Agentic energy tax — how much more energy agentic uses vs linear for same task"
+    provenance: CALCULATED
+    layer: orchestration
+    unit: "×"
+    type: aggregate
+    sql: |
+      SELECT AVG(agentic_dynamic_uj) / NULLIF(AVG(linear_dynamic_uj), 0) AS value
+      FROM orchestration_tax_summary
+    formula_latex: "\\tau = \\frac{E_{agentic}}{E_{linear}}"
+    visible_in: [workbench, showcase, commons]
+    significance: thesis_core
+
+  - id: ooi_time
+    description: "Orchestration Overhead Index — fraction of wall time on orchestration"
+    provenance: CALCULATED
+    layer: orchestration
+    unit: ratio
+    type: aggregate
+    sql: |
+      SELECT AVG(orchestration_cpu_ms / NULLIF(duration_ns / 1e6, 0)) AS value
+      FROM runs
+      WHERE workflow_type = 'agentic'
+        AND orchestration_cpu_ms > 0
+        AND duration_ns > 0
+    formula_latex: "OOI_t = \\frac{T_{orch}}{T_{total}}"
+    visible_in: [workbench, showcase, commons]
+    significance: thesis_core
+
+  - id: ucr
+    description: "Useful Compute Ratio — fraction of time doing real LLM compute"
+    provenance: CALCULATED
+    layer: orchestration
+    unit: ratio
+    type: aggregate
+    sql: |
+      SELECT AVG(compute_time_ms / NULLIF(duration_ns / 1e6, 0)) AS value
+      FROM runs
+      WHERE workflow_type = 'agentic'
+        AND compute_time_ms > 0
+        AND duration_ns > 0
+    formula_latex: "UCR = \\frac{T_{compute}}{T_{total}}"
+    visible_in: [workbench, showcase, commons]
+    significance: thesis_core
+
+  # ── INFERRED: From grid intensity and environmental factors ──────────────
+
+  - id: carbon_g_per_query
+    description: "Carbon footprint per query — inferred from grid intensity × dynamic energy"
+    provenance: INFERRED
+    layer: application
+    unit: gCO₂
+    type: aggregate
+    sql: |
+      SELECT AVG(carbon_g) AS value
+      FROM runs
+      WHERE (:run_id IS NULL OR run_id = :run_id)
+        AND carbon_g > 0
+    formula_latex: "CO_2 = E_{dynamic} \\times I_{grid}(country)"
+    visible_in: [workbench, showcase, commons]
+    significance: supporting
+
+  - id: water_ml_per_query
+    description: "Water usage per query — inferred from energy × water intensity factor"
+    provenance: INFERRED
+    layer: application
+    unit: ml
+    type: aggregate
+    sql: |
+      SELECT AVG(water_ml) AS value
+      FROM runs
+      WHERE (:run_id IS NULL OR run_id = :run_id)
+        AND water_ml > 0
+    formula_latex: "W = E_{dynamic} \\times F_{water}"
+    visible_in: [workbench, showcase, commons]
+    significance: supporting
+
+  - id: carbon_per_token_mg
+    description: "Carbon cost per token — inferred from carbon per query / tokens"
+    provenance: INFERRED
+    layer: application
+    unit: mgCO₂/token
+    type: derived
+    depends_on: [carbon_g_per_query, total_tokens]
+    formula: (carbon_g_per_query * 1000) / total_tokens
+    formula_latex: "CO_{2,token} = \\frac{CO_2 \\times 10^3}{N_{tokens}}"
+    visible_in: [workbench, showcase, commons]
+    significance: supporting
+
+# ── Layer definitions ─────────────────────────────────────────────────────────
+layers:
+  - id: silicon
+    label: Silicon
+    order: 1
+    color: "#1D9E75"
+    badge: MEASURED
+
+  - id: orchestration
+    label: Orchestration
+    order: 3
+    color: "#BA7517"
+    badge: CALCULATED
+
+  - id: application
+    label: Application
+    order: 4
+    color: "#185FA5"
+    badge: INFERRED
+
+# ── Significance ──────────────────────────────────────────────────────────────
+significance:
+  - id: thesis_core
+    label: Thesis core
+    color: "#E24B4A"
+  - id: supporting
+    label: Supporting
+    color: "#888780"

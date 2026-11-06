@@ -1,0 +1,3796 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+DATABASE SCHEMA – SQL definitions for all A‑LEMS tables
+================================================================================
+
+PURPOSE:
+    Contains all CREATE TABLE, CREATE INDEX, and CREATE VIEW statements
+    for the A‑LEMS database. This file is pure SQL – no Python logic.
+
+WHY THIS EXISTS:
+    - Separates schema definition from database logic
+    - Makes schema changes easier to track
+    - Can be reused by migration scripts
+    - Keeps SQL in one place for review
+
+TABLES:
+    1. experiments
+    2. hardware_config
+    3. idle_baselines
+    4. runs (main table, 70+ columns)
+    5. orchestration_events
+    6. orchestration_tax_summary
+    7. energy_samples
+    8. cpu_samples
+    9. interrupt_samples
+    10. ml_features (view)
+
+AUTHOR: Deepak Panigrahy
+================================================================================
+"""
+
+# ========================================================================
+# Table 1: experiments
+# ========================================================================
+CREATE_EXPERIMENTS = """
+CREATE TABLE IF NOT EXISTS experiments (
+    exp_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    workflow_type TEXT CHECK(workflow_type IN ('linear','agentic','comparison')),
+    model_name TEXT,
+    model_id                  TEXT,
+    execution_site            TEXT,
+    transport                 TEXT,
+    remote_energy_available   INTEGER DEFAULT 0,
+    provider TEXT,
+    task_name TEXT,
+    country_code TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- ========== NEW COLUMNS START ==========
+    group_id TEXT,                          -- Session ID (TD7)
+    status TEXT DEFAULT 'pending',           -- pending/running/completed/partial/failed (TD8)
+    started_at TIMESTAMP,                    -- When experiment started (TD8)
+    completed_at TIMESTAMP,                  -- When experiment ended (TD8)
+    error_message TEXT,                      -- Error if failed (TD8)
+    runs_completed INTEGER DEFAULT 0,        -- Number of successful runs (TD8)
+    runs_total INTEGER,
+    optimization_enabled INTEGER DEFAULT 0,                                            -- Total runs planned (TD8)
+    global_exp_id         TEXT,      -- cross-machine experiment correlation ID
+    -- ========== NEW COLUMNS END ==========
+    experiment_type TEXT NOT NULL DEFAULT 'normal',  -- study intent: normal/overhead_study/retry_study/failure_injection/quality_sweep/calibration/ablation/pilot/debug
+    experiment_goal TEXT,                             -- free-text description of what this experiment measures
+    experiment_notes TEXT,                            -- free-text operational notes
+    hw_id INTEGER REFERENCES hardware_config(hw_id),
+    env_id INTEGER REFERENCES environment_config(env_id),    
+    is_valid INTEGER NOT NULL DEFAULT 1,              -- 0 = development artifact, excluded from paper queries
+    invalidation_reason TEXT,                         -- reason for invalidation if is_valid=0
+    invalidated_at TIMESTAMP                          -- when invalidated    
+);
+"""
+
+# Valid experiment_type values — single source of truth for triggers and application validation
+VALID_EXPERIMENT_TYPES = (
+    'normal', 'overhead_study', 'retry_study', 'failure_injection',
+    'quality_sweep', 'calibration', 'ablation', 'pilot', 'debug'
+)
+
+CREATE_EXPERIMENT_TYPE_TRIGGERS = """
+CREATE TRIGGER IF NOT EXISTS trg_exp_type_insert
+BEFORE INSERT ON experiments
+BEGIN
+    SELECT CASE
+        WHEN NEW.experiment_type IS NULL OR NEW.experiment_type NOT IN (
+            'normal','overhead_study','retry_study','failure_injection',
+            'quality_sweep','calibration','ablation','pilot','debug'
+        )
+        THEN RAISE(ABORT, 'Invalid experiment_type value')
+    END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_exp_type_update
+BEFORE UPDATE OF experiment_type ON experiments
+BEGIN
+    SELECT CASE
+        WHEN NEW.experiment_type IS NULL OR NEW.experiment_type NOT IN (
+            'normal','overhead_study','retry_study','failure_injection',
+            'quality_sweep','calibration','ablation','pilot','debug'
+        )
+        THEN RAISE(ABORT, 'Invalid experiment_type value')
+    END;
+END;
+"""
+# ========================================================================
+# Table: failure_taxonomy
+# SPEC 8.6-A1: Extensible lookup table for failure type classification.
+# Enforcement: application layer (tool_failure_recorder.py) validates
+# failure_type against this table. No DB-level FK on tool_failure_events
+# or goal_attempt — avoids reconstruction risk across machine histories.
+# Adding a new failure type = one INSERT here, zero migrations, zero code.
+# domain CHECK is a structural invariant (6 families, stable forever).
+# ========================================================================
+CREATE_FAILURE_TAXONOMY = """
+CREATE TABLE IF NOT EXISTS failure_taxonomy (
+    failure_type_id         TEXT PRIMARY KEY,
+    domain                  TEXT NOT NULL CHECK(domain IN (
+                                'reasoning', 'execution', 'communication',
+                                'resource', 'validation', 'platform_specific'
+                            )),
+    description             TEXT,
+    default_retryable       INTEGER NOT NULL DEFAULT 1
+                            CHECK(default_retryable IN (0, 1)),
+    default_recovery_strategy TEXT,
+    typical_cost_rank       INTEGER,
+    created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_failure_taxonomy_domain
+    ON failure_taxonomy(domain);
+"""
+ 
+# ========================================================================
+# Table: recovery_taxonomy
+# SPEC 8.6-A1: Extensible lookup table for recovery strategy classification.
+# requires_state_preservation = 1 means orchestration state must be held
+# in memory across the recovery boundary.
+# typical_rollback_depth: 0 = no rollback, N = N turns, -1 = full restart.
+# ========================================================================
+CREATE_RECOVERY_TAXONOMY = """
+CREATE TABLE IF NOT EXISTS recovery_taxonomy (
+    strategy_id                 TEXT PRIMARY KEY,
+    description                 TEXT,
+    requires_state_preservation INTEGER DEFAULT 0
+                                CHECK(requires_state_preservation IN (0, 1)),
+    typical_rollback_depth      INTEGER,
+    created_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+# ========================================================================
+# Table: failure_injection_log
+# SPEC 8.6-A2: Core schema — injection decisions are run provenance.
+# One row per injection decision (injected/skipped/suppressed/eligible/
+# target_not_reached). Written by _flush_injection_log() in
+# goal_execution_manager.py after finish_attempt().
+# run_id is NULL at insert; ETL backfills after runs row is created.
+# injected_type FK references failure_taxonomy (requires v098/A1).
+# ========================================================================
+CREATE_FAILURE_INJECTION_LOG = """
+CREATE TABLE IF NOT EXISTS failure_injection_log (
+    injection_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id                      INTEGER REFERENCES runs(run_id),
+    attempt_id                  INTEGER REFERENCES goal_attempt(attempt_id),
+    goal_id                     INTEGER REFERENCES goal_execution(goal_id),
+    scenario_id                 TEXT NOT NULL,
+    rule_index                  INTEGER NOT NULL,
+    injected_type               TEXT REFERENCES failure_taxonomy(failure_type_id),
+    target_step                 INTEGER,
+    target_phase                TEXT,
+    target_tool                 TEXT,
+    injection_time_ns           INTEGER,
+    draw_number                 INTEGER NOT NULL DEFAULT 0,
+    random_seed                 TEXT NOT NULL DEFAULT '',
+    injection_algorithm_version TEXT NOT NULL DEFAULT 'v1',
+    status                      TEXT NOT NULL CHECK(status IN (
+                                    'eligible', 'selected', 'injected',
+                                    'skipped', 'target_not_reached', 'suppressed'
+                                )),
+    skip_reason                 TEXT,
+    created_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_injection_log_attempt
+    ON failure_injection_log(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_injection_log_run
+    ON failure_injection_log(run_id);
+CREATE INDEX IF NOT EXISTS idx_injection_log_scenario
+    ON failure_injection_log(scenario_id);
+CREATE INDEX IF NOT EXISTS idx_injection_log_type
+    ON failure_injection_log(injected_type);
+CREATE INDEX IF NOT EXISTS idx_injection_log_status
+    ON failure_injection_log(status);
+"""
+
+# ========================================================================
+# Table: failure_cost_profile
+# Extension data promoted to core schema (applied via v90002 on all machines).
+# Populated by scripts/etl/failure_cost_profile_etl.py — never by runtime hot path.
+# One row per (failure_type_id, experiment_group) pair.
+# Feeds A4 EAR engine calibration.
+CREATE_FAILURE_COST_PROFILE = """
+CREATE TABLE IF NOT EXISTS failure_cost_profile (
+    profile_id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    failure_type_id             TEXT NOT NULL,
+    experiment_group            TEXT NOT NULL,
+    sample_count                INTEGER NOT NULL CHECK(sample_count >= 0),
+    recovery_cost_uj_mean       REAL CHECK(recovery_cost_uj_mean   IS NULL OR recovery_cost_uj_mean   >= 0),
+    recovery_cost_uj_median     REAL CHECK(recovery_cost_uj_median IS NULL OR recovery_cost_uj_median >= 0),
+    recovery_cost_uj_p25        REAL,
+    recovery_cost_uj_p75        REAL,
+    recovery_cost_uj_std        REAL CHECK(recovery_cost_uj_std    IS NULL OR recovery_cost_uj_std    >= 0),
+    recovery_success_rate       REAL CHECK(recovery_success_rate   IS NULL OR recovery_success_rate   BETWEEN 0 AND 1),
+    recovery_success_count      INTEGER CHECK(recovery_success_count IS NULL OR recovery_success_count >= 0),
+    recovery_attempts_mean      REAL,
+    recovery_latency_ms_mean    REAL,
+    cost_per_recovery_success   REAL,
+    computed_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(failure_type_id, experiment_group)
+);
+CREATE INDEX IF NOT EXISTS idx_fcp_type  ON failure_cost_profile(failure_type_id);
+CREATE INDEX IF NOT EXISTS idx_fcp_group ON failure_cost_profile(experiment_group);
+"""
+
+# ========================================================================
+# Tables: ear_policy, ear_policy_rules, ear_decision_log
+# Core schema — code in core/retry/ writes to ear_decision_log on hot path.
+# Calibration (ear_policy, ear_policy_rules) populated by ear_calibrator.py.
+# Applied via v105_ear_engine.sql on existing machines.
+CREATE_EAR_TABLES = """
+CREATE TABLE IF NOT EXISTS ear_policy (
+    ear_policy_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_name         TEXT NOT NULL UNIQUE,
+    description         TEXT,
+    calibration_scope   TEXT NOT NULL DEFAULT 'experiment_group',
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+ 
+CREATE TABLE IF NOT EXISTS ear_policy_rules (
+    rule_id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ear_policy_id                   INTEGER NOT NULL REFERENCES ear_policy(ear_policy_id),
+    failure_type_id                 TEXT NOT NULL,
+    max_attempts                    INTEGER NOT NULL CHECK(max_attempts >= 0),
+    cost_threshold_uj               REAL CHECK(cost_threshold_uj IS NULL OR cost_threshold_uj >= 0),
+    calibrated_success_prob         REAL CHECK(calibrated_success_prob IS NULL OR calibrated_success_prob BETWEEN 0 AND 1),
+    success_probability_threshold   REAL CHECK(success_probability_threshold IS NULL OR success_probability_threshold BETWEEN 0 AND 1),
+    action                          TEXT NOT NULL CHECK(action IN ('retry', 'abort', 'fallback')),
+    priority                        INTEGER NOT NULL DEFAULT 0,
+    created_at                      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(ear_policy_id, failure_type_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ear_rules_policy ON ear_policy_rules(ear_policy_id);
+CREATE INDEX IF NOT EXISTS idx_ear_rules_type   ON ear_policy_rules(failure_type_id);
+ 
+CREATE TABLE IF NOT EXISTS ear_decision_log (
+    decision_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id                  INTEGER REFERENCES runs(run_id),
+    attempt_id              INTEGER REFERENCES goal_attempt(attempt_id),
+    failure_type_id         TEXT,
+    attempt_number          INTEGER,
+    budget_remaining_uj     REAL,
+    action                  TEXT NOT NULL,
+    reason                  TEXT,
+    calibration_cost_uj     REAL,
+    calibration_success_prob REAL CHECK(calibration_success_prob IS NULL OR calibration_success_prob BETWEEN 0 AND 1),
+    decided_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ear_log_run     ON ear_decision_log(run_id);
+CREATE INDEX IF NOT EXISTS idx_ear_log_attempt ON ear_decision_log(attempt_id);
+"""
+
+# ============================================================================
+# B1: recovery_events + v_recovery_cost_by_depth
+# SPEC 8.6-B1: Recovery depth and rollback tracking for Stephen's MLSys paper.
+# Joins to goal_attempt via attempt_id (P5 attribution path).
+# rollback_depth_turns semantics per P6 (measured in turns):
+#   0 = tool-only retry, -1 = full restart, N = N turns back.
+# replay_fraction = replayed_steps / total_trajectory_steps (measured in steps).
+# Median not in view: SQLite has no native MEDIAN.
+# Use scripts/analysis/recovery_depth_stats.py for full distribution.
+# ============================================================================
+CREATE_RECOVERY_EVENTS = """
+CREATE TABLE IF NOT EXISTS recovery_events (
+    recovery_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id              INTEGER NOT NULL
+                                REFERENCES goal_attempt(attempt_id),
+    goal_id                 INTEGER NOT NULL
+                                REFERENCES goal_execution(goal_id),
+    agent_id                INTEGER,
+    failure_type_id         TEXT
+                                REFERENCES failure_taxonomy(failure_type_id),
+    recovery_strategy       TEXT
+                                REFERENCES recovery_taxonomy(strategy_id),
+    rollback_depth_turns    INTEGER NOT NULL DEFAULT 0,
+    total_trajectory_steps  INTEGER
+                                CHECK(total_trajectory_steps IS NULL
+                                      OR total_trajectory_steps >= 0),
+    replayed_steps          INTEGER
+                                CHECK(replayed_steps IS NULL
+                                      OR replayed_steps >= 0),
+    replay_fraction         REAL
+                                CHECK(replay_fraction IS NULL
+                                      OR (replay_fraction >= 0
+                                          AND replay_fraction <= 1)),
+    preserved_state_bytes   INTEGER
+                                CHECK(preserved_state_bytes IS NULL
+                                      OR preserved_state_bytes >= 0),
+    recovery_point_step     INTEGER,
+    recovery_point_phase    TEXT
+                                CHECK(recovery_point_phase IS NULL
+                                      OR recovery_point_phase IN
+                                         ('planning','execution','synthesis')),
+    recovery_start_ns       INTEGER,
+    recovery_end_ns         INTEGER,
+    recovery_energy_uj      REAL
+                                CHECK(recovery_energy_uj IS NULL
+                                      OR recovery_energy_uj >= 0),
+    recovery_success        INTEGER
+                                CHECK(recovery_success IS NULL
+                                      OR recovery_success IN (0, 1)),
+    created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_attempt
+    ON recovery_events(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_recovery_goal
+    ON recovery_events(goal_id);
+CREATE INDEX IF NOT EXISTS idx_recovery_type
+    ON recovery_events(failure_type_id);
+CREATE INDEX IF NOT EXISTS idx_recovery_depth
+    ON recovery_events(rollback_depth_turns);
+
+CREATE VIEW IF NOT EXISTS v_recovery_cost_by_depth AS
+SELECT
+    rollback_depth_turns,
+    recovery_strategy,
+    COUNT(*)                                                AS sample_count,
+    AVG(recovery_energy_uj) / 1e6                          AS recovery_cost_j_mean,
+    AVG(replay_fraction)                                   AS avg_replay_fraction,
+    SUM(CASE WHEN recovery_success = 1 THEN 1 ELSE 0 END) AS success_count,
+    ROUND(
+        SUM(CASE WHEN recovery_success = 1 THEN 1 ELSE 0 END) * 100.0
+        / NULLIF(COUNT(*), 0),
+    2)                                                     AS success_rate_pct
+FROM recovery_events
+GROUP BY rollback_depth_turns, recovery_strategy
+ORDER BY rollback_depth_turns;
+"""
+# ========================================================================
+# Table 2b: goal_execution
+# Paper's fundamental unit of analysis — energy per successful goal
+# workflow_type set by application layer explicitly — never derived from
+# experiments.workflow_type because comparison experiments contain both sides
+# ETL columns insert as NULL, populated async by chunk8_goal_etl.py
+#-- goal_execution
+#-- PAPER UNIT OF ANALYSIS. One row per user goal across one experiment.
+#-- A goal may require multiple attempts (retries). This table aggregates
+#-- all attempt outcomes into a single success/failure verdict with full
+#-- energy accounting. ETL columns (total_energy_uj etc.) are NULL at insertCREATE_GOAL_ATTEMPT = """
+#-- and populated asynchronously by goal_execution_etl.py.
+#-- FK anchor: exp_id → experiments, first_run_id → runs, winning_run_id → runs
+# ========================================================================
+CREATE_GOAL_EXECUTION = """
+CREATE TABLE IF NOT EXISTS goal_execution (
+    goal_id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    exp_id                  INTEGER NOT NULL,
+    first_run_id            INTEGER,
+    goal_description        TEXT NOT NULL,
+    goal_type               TEXT NOT NULL,
+    workflow_type           TEXT NOT NULL
+                            CHECK(workflow_type IN ('linear','agentic')),
+    gpu_total_energy_uj     INTEGER, -- total GPU energy across all attempts for this goal
+    gpu_pct_of_pkg          REAL,    -- gpu_total_energy_uj / total_energy_uj * 100                        
+    difficulty_level        TEXT
+                            CHECK(difficulty_level IS NULL OR difficulty_level IN (
+                                'easy','medium','hard'
+                            )),
+    total_attempts          INTEGER NOT NULL DEFAULT 1,
+    success                 INTEGER NOT NULL DEFAULT 0,
+    winning_run_id          INTEGER,
+    total_energy_uj         INTEGER,
+    successful_energy_uj    INTEGER,
+    overhead_energy_uj      INTEGER,
+    overhead_fraction       REAL,
+    orchestration_fraction  REAL,
+    wall_time_ms            REAL,
+    task_id                 TEXT,
+    status                  TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending','running','solved','failed','partial')),
+    started_at              TIMESTAMP,
+    finished_at             TIMESTAMP,
+    updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    winning_attempt_id      INTEGER,  -- direct FK to winning attempt; backfilled by v099
+    FOREIGN KEY (exp_id)              REFERENCES experiments(exp_id),
+    FOREIGN KEY (winning_run_id)      REFERENCES runs(run_id),
+    FOREIGN KEY (winning_attempt_id)  REFERENCES goal_attempt(attempt_id)
+);
+CREATE INDEX IF NOT EXISTS idx_goal_exec_exp_id       ON goal_execution(exp_id);
+CREATE INDEX IF NOT EXISTS idx_goal_exec_workflow      ON goal_execution(workflow_type, success);
+CREATE INDEX IF NOT EXISTS idx_goal_exec_type          ON goal_execution(goal_type);
+CREATE INDEX IF NOT EXISTS idx_goal_exec_difficulty    ON goal_execution(difficulty_level, success);
+CREATE INDEX IF NOT EXISTS idx_goal_exec_success       ON goal_execution(success, exp_id);
+CREATE INDEX IF NOT EXISTS idx_goal_exec_task_id       ON goal_execution(task_id);
+CREATE INDEX IF NOT EXISTS idx_goal_exec_status           ON goal_execution(status);
+CREATE INDEX IF NOT EXISTS idx_goal_exec_winning_attempt  ON goal_execution(winning_attempt_id);
+"""
+
+
+# ========================================================================
+# Table 2c: goal_attempt
+# Thin linkage layer — outcome + energy snapshot per attempt
+# energy columns are denormalized point-in-time snapshots from runs
+# normalized_score populated by Agent 8.3 output_quality ETL
+#-- goal_attempt
+#-- One row per execution attempt for a goal. Links a goal to the run that
+#-- measured it. Outcome records terminal state. Energy columns are denormalized
+#-- snapshots from runs/energy_attribution at insert time for analytics speed.
+#-- normalized_score and pass_fail populated by output_quality ETL (Agent 8.4).
+#-- UNIQUE(goal_id, attempt_number) prevents duplicate retry numbering.
+#-- FK anchor: goal_id → goal_execution, run_id → runs
+# ========================================================================
+CREATE_GOAL_ATTEMPT = """
+CREATE TABLE IF NOT EXISTS goal_attempt (
+    attempt_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id                 INTEGER NOT NULL,
+    run_id                  INTEGER NOT NULL,
+    attempt_number          INTEGER NOT NULL DEFAULT 1,
+    is_retry                INTEGER NOT NULL DEFAULT 0,   -- 1 if attempt follows prior failure on same goal_id
+    is_winning              INTEGER NOT NULL DEFAULT 0,
+    outcome                 TEXT NOT NULL
+                            CHECK(outcome IN (
+                                'success','failure','hallucination',
+                                'timeout','context_overflow','api_error'
+                            )),
+    failure_cause           TEXT
+                            CHECK(failure_cause IS NULL OR failure_cause IN (
+                                'api_error','tool_error','wrong_answer',
+                                'timeout','context_overflow','rate_limit'
+                            )),
+    energy_uj               INTEGER,
+    orchestration_uj        INTEGER,
+    compute_uj              INTEGER,
+    normalized_score        REAL,
+    pass_fail               INTEGER,
+    status                  TEXT NOT NULL DEFAULT 'running'
+                            CHECK(status IN (
+                                'running','success','failed',
+                                'cancelled','timeout','crashed'
+                            )),
+    started_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at_ns           INTEGER,   -- time.time_ns() at attempt start — ns precision
+    finished_at             TIMESTAMP,
+    finished_at_ns          INTEGER,   -- time.time_ns() at attempt finish — ns precision
+    updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    retry_of_attempt_id     INTEGER,  -- attempt_id this retries, NULL if first attempt
+    failure_type            TEXT,     -- fine-grained failure classification
+    -- GPU PP1 energy for this attempt — NULL on non-Tiger-Lake platforms
+    gpu_energy_uj           INTEGER,  -- gpu_dynamic_energy_uj from runs for this attempt
+    UNIQUE(goal_id, attempt_number),
+    FOREIGN KEY (goal_id) REFERENCES goal_execution(goal_id),
+    FOREIGN KEY (run_id)  REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_goal_attempt_goal_id         ON goal_attempt(goal_id);
+CREATE INDEX IF NOT EXISTS idx_goal_attempt_run_id          ON goal_attempt(run_id);
+CREATE INDEX IF NOT EXISTS idx_goal_attempt_outcome         ON goal_attempt(outcome);
+CREATE INDEX IF NOT EXISTS idx_goal_attempt_winning         ON goal_attempt(goal_id, is_winning);
+CREATE INDEX IF NOT EXISTS idx_goal_attempt_goal_attemptnum ON goal_attempt(goal_id, attempt_number);
+CREATE INDEX IF NOT EXISTS idx_goal_attempt_status          ON goal_attempt(status);
+"""
+# ========================================================================
+# Table 2d: tool_failure_events
+# One row per failed tool call within one attempt.
+# failure_type, failure_phase, recovery_strategy: free text — no DB CHECK.
+# Domain vocabulary enforced at application layer (tool_failure_recorder.py)
+# against failure_taxonomy and recovery_taxonomy dimension tables.
+# Fact tables never carry domain CHECK constraints — dimension tables own vocabulary.
+# wasted_energy_uj (REAL) populated by energy_attribution_etl.py. NULL at insert.
+# FK anchor: attempt_id → goal_attempt, goal_id → goal_execution
+# ========================================================================
+CREATE_TOOL_FAILURE_EVENTS = """
+CREATE TABLE IF NOT EXISTS tool_failure_events (
+    failure_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id              INTEGER NOT NULL,
+    goal_id                 INTEGER NOT NULL,
+    orchestration_event_id  INTEGER,
+    tool_name               TEXT NOT NULL,
+    failure_type            TEXT NOT NULL,
+    failure_phase           TEXT,
+    error_message           TEXT,
+    retry_attempted         INTEGER NOT NULL DEFAULT 0,
+    retry_success           INTEGER NOT NULL DEFAULT 0,
+    recovery_strategy       TEXT,
+    wasted_energy_uj        REAL,
+    created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (attempt_id)             REFERENCES goal_attempt(attempt_id),
+    FOREIGN KEY (goal_id)                REFERENCES goal_execution(goal_id),
+    FOREIGN KEY (orchestration_event_id) REFERENCES orchestration_events(event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tool_fail_attempt      ON tool_failure_events(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_tool_fail_goal         ON tool_failure_events(goal_id);
+CREATE INDEX IF NOT EXISTS idx_tool_fail_tool         ON tool_failure_events(tool_name);
+CREATE INDEX IF NOT EXISTS idx_tool_fail_type         ON tool_failure_events(failure_type);
+CREATE INDEX IF NOT EXISTS idx_tool_fail_phase        ON tool_failure_events(failure_phase);
+CREATE INDEX IF NOT EXISTS idx_tool_fail_orch_event   ON tool_failure_events(orchestration_event_id);
+CREATE INDEX IF NOT EXISTS idx_tool_fail_attempt_type ON tool_failure_events(attempt_id, failure_type);
+"""
+# ========================================================================
+# Table 2e: hallucination_events
+# hallucination_events
+# One row per hallucination detected within one attempt. A hallucination is
+# an unsupported or incorrect output later classified as hallucinatory.
+# hallucination_type and detection_method are open TEXT governed by
+# core/ontology_registry.py — not CHECK enums — to allow taxonomy evolution
+# across 100 papers without DB migrations.
+# wasted_energy_uj_real (REAL) is the authoritative energy column.
+# wasted_energy_uj (INTEGER) retained for backward compatibility only.
+# Populated by energy_attribution_etl.py. NULL at insert.
+# FK anchor: attempt_id → goal_attempt, goal_id → goal_execution
+# ========================================================================
+CREATE_HALLUCINATION_EVENTS = """
+CREATE TABLE IF NOT EXISTS hallucination_events (
+    hallucination_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id              INTEGER NOT NULL,
+    goal_id                 INTEGER NOT NULL,
+    decision_id             INTEGER,
+    interaction_id          INTEGER,
+    orchestration_event_id  INTEGER,
+    hallucination_type      TEXT NOT NULL,
+    detection_method        TEXT NOT NULL,
+    detection_confidence    REAL,
+    semantic_similarity     REAL,
+    severity                REAL,
+    expected_output         TEXT,
+    actual_output           TEXT,
+    wasted_energy_uj        INTEGER,
+    wasted_energy_uj_real   INTEGER,  -- populated by energy_attribution_etl.py, NULL at insert
+
+    detected_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (attempt_id)             REFERENCES goal_attempt(attempt_id),
+    FOREIGN KEY (goal_id)                REFERENCES goal_execution(goal_id),
+    FOREIGN KEY (decision_id)            REFERENCES agent_decision_tree(decision_id),
+    FOREIGN KEY (interaction_id)         REFERENCES llm_interactions(interaction_id),
+    FOREIGN KEY (orchestration_event_id) REFERENCES orchestration_events(event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_halluc_attempt_id   ON hallucination_events(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_halluc_goal_id      ON hallucination_events(goal_id);
+CREATE INDEX IF NOT EXISTS idx_halluc_type         ON hallucination_events(hallucination_type);
+CREATE INDEX IF NOT EXISTS idx_halluc_method       ON hallucination_events(detection_method);
+CREATE INDEX IF NOT EXISTS idx_halluc_attempt_type ON hallucination_events(attempt_id, hallucination_type);
+"""
+# ========================================================================
+# Table 2f: output_quality
+# output_quality
+# One row per goal_attempt. Reconciled judgment verdict across all judges.
+# Per-judge evidence lives in output_quality_judges child table — supports N judges.
+# score_method and normalized_score computed by application layer at insert time:
+#   single_judge: one judge only
+#   averaged: agreement >= 0.8
+#   conservative_min: agreement >= 0.5
+#   needs_review: agreement < 0.5, normalized_score = NULL
+# Rows with score_method = 'needs_review' excluded from all paper analysis queries.
+# UNIQUE(attempt_id) enforces one verdict per attempt.
+# FK anchor: attempt_id → goal_attempt, goal_id → goal_execution
+# ======================================================================== 
+CREATE_OUTPUT_QUALITY = """
+CREATE TABLE IF NOT EXISTS output_quality (
+    quality_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id              INTEGER NOT NULL,
+    goal_id                 INTEGER NOT NULL,
+    task_id                 TEXT,
+    metric_type             TEXT NOT NULL CHECK(metric_type IN ('binary','scalar','pairwise','testsuite')),
+    raw_score               REAL,
+    normalized_score        REAL,
+    pass_fail               INTEGER,
+    judge_method            TEXT NOT NULL,
+    judge_count             INTEGER NOT NULL DEFAULT 1,
+    agreement_score         REAL,
+    task_category           TEXT,
+    score_method            TEXT CHECK(score_method IN (
+                                'averaged','conservative_min','consensus_median',
+                                'majority_median','needs_review','single_judge',
+                                'back_scored','stub_skipped'
+                            )),
+    expected_output         TEXT,
+    actual_output           TEXT,
+    energy_uj_at_judgment   INTEGER,
+    manual_reviewed         INTEGER NOT NULL DEFAULT 0,
+    judged_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    scorer_version          TEXT,
+    scorer_config_hash      TEXT,
+    FOREIGN KEY (attempt_id) REFERENCES goal_attempt(attempt_id),
+    FOREIGN KEY (goal_id)    REFERENCES goal_execution(goal_id)
+);
+-- SPEC 35J (v094): judge_method CHECK removed, validated against the live
+-- scorer registry at insert time instead (Fix 1). UNIQUE(attempt_id)
+-- removed so back-scoring can add rows for an already-scored attempt
+-- (Fix 2). scorer_version/scorer_config_hash added for provenance.
+CREATE INDEX IF NOT EXISTS idx_output_qual_attempt       ON output_quality(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_output_qual_goal          ON output_quality(goal_id);
+CREATE INDEX IF NOT EXISTS idx_output_qual_metric        ON output_quality(metric_type);
+CREATE INDEX IF NOT EXISTS idx_output_qual_score         ON output_quality(normalized_score);
+CREATE INDEX IF NOT EXISTS idx_output_qual_method        ON output_quality(judge_method);
+CREATE INDEX IF NOT EXISTS idx_output_qual_task_category ON output_quality(task_category);
+"""
+# ========================================================================
+# Table 2g: output_quality_judges
+# output_quality_judges
+# One row per judge per attempt. Evidence trail for the reconciled verdict
+# in output_quality. Supports N judges — no hardcoded two-judge ceiling.
+# judge_prompt_hash enables exact reproduction of judgments across papers.
+# judge_version/temperature/provider required for cross-paper judge pipeline
+# comparison and reproducibility.
+# FK anchor: quality_id → output_quality, attempt_id → goal_attempt
+# ========================================================================  
+CREATE_OUTPUT_QUALITY_JUDGES = """
+CREATE TABLE IF NOT EXISTS output_quality_judges (
+    judge_entry_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    quality_id              INTEGER NOT NULL,
+    attempt_id              INTEGER NOT NULL,
+    goal_id                 INTEGER NOT NULL,
+    judge_model             TEXT NOT NULL,
+    judge_provider          TEXT,
+    judge_version           TEXT,
+    judge_temperature       REAL,
+    judge_score             REAL NOT NULL,
+    judge_confidence        REAL,
+    judge_prompt_hash       TEXT,
+    judge_reasoning         TEXT,
+    judged_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (quality_id) REFERENCES output_quality(quality_id),
+    FOREIGN KEY (attempt_id) REFERENCES goal_attempt(attempt_id),
+    FOREIGN KEY (goal_id)    REFERENCES goal_execution(goal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_oqj_quality ON output_quality_judges(quality_id);
+CREATE INDEX IF NOT EXISTS idx_oqj_attempt ON output_quality_judges(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_oqj_goal    ON output_quality_judges(goal_id);
+"""
+# ========================================================================
+# Table: task_quality_config
+# Category-level quality judge configuration.
+# One row per task_category — works uniformly for EpG, mEpG, qEpG tasks.
+# Seeded by scripts/seed_quality_config.py after migration 042.
+# FK: task_category → task_categories.task_id
+# ========================================================================
+CREATE_TASK_QUALITY_CONFIG = """
+CREATE TABLE IF NOT EXISTS task_quality_config (
+    config_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_category     TEXT NOT NULL UNIQUE,
+    metric_type       TEXT NOT NULL CHECK(metric_type IN ('binary','scalar','pairwise','testsuite')),
+    judge_method      TEXT NOT NULL,
+    threshold         REAL NOT NULL DEFAULT 0.80,
+    dual_judge        INTEGER NOT NULL DEFAULT 0,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    n_judges          INTEGER NOT NULL DEFAULT 1,
+    judge_model_set   TEXT,
+    rubric            TEXT,
+    success_threshold REAL
+);
+-- SPEC 35J (v094): judge_method CHECK removed (Fix 1, matches
+-- ScorerRegistry's 'semantic' spelling now, not the old
+-- 'semantic_similarity'). FK to task_categories(task_id) removed
+-- (Problem 8) — it was semantically wrong: task_category holds a
+-- bucket ("coding"), task_categories.task_id holds an individual task
+-- name ("code_fibonacci"). All 15 pre-existing rows already violated
+-- it. Category validity is a configuration/seeding-layer concern now.
+CREATE INDEX IF NOT EXISTS idx_tqc_category ON task_quality_config(task_category);
+CREATE INDEX IF NOT EXISTS idx_tqc_method   ON task_quality_config(judge_method);
+"""
+# ========================================================================
+# Table: goal_output
+# SPEC 35J (v094) Problem 6: canonical final-output record for a goal's
+# winning attempt (is_winning=1). Independent of live scoring — every
+# attempt is judged (including losers, for hallucination detection),
+# only the winner's output is captured here for backfill/provenance.
+# ========================================================================
+CREATE_GOAL_OUTPUT = """
+CREATE TABLE IF NOT EXISTS goal_output (
+    goal_id        INTEGER PRIMARY KEY
+                   REFERENCES goal_execution(goal_id),
+    run_id         INTEGER NOT NULL
+                   REFERENCES runs(run_id),
+    attempt_id     INTEGER NOT NULL
+                   REFERENCES goal_attempt(attempt_id),
+    output_text    TEXT,
+    output_type    TEXT NOT NULL DEFAULT 'answer'
+                   CHECK (output_type IN (
+                       'answer','failure','timeout',
+                       'context_overflow','api_error','empty'
+                   )),
+    capture_method TEXT NOT NULL DEFAULT 'forward'
+                   CHECK (capture_method IN (
+                       'forward','backfill_inferred','manual'
+                   )),
+    step_index     INTEGER,
+    captured_at    TEXT NOT NULL
+                   DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+"""
+
+# ── NEW CONSTANT — paste after CREATE_GOAL_ATTEMPT block ─────────────────────
+# Table 2h:etl_queue
+# Table-backed queue for decoupled ETL execution.
+# Runner enqueues pending entries after save_pair(). ETL runner processes them.
+# status: pending → processing → done|failed
+# error_message populated on failure for diagnosis. NULL on success.
+CREATE_ETL_QUEUE = """
+CREATE TABLE IF NOT EXISTS etl_queue (
+    queue_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type   TEXT NOT NULL
+                  CHECK(entity_type IN ('goal_execution','run')),
+    entity_id     INTEGER NOT NULL,
+    etl_name      TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending'
+                  CHECK(status IN ('pending','processing','done','failed')),
+    error_message TEXT,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed_at  TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_etl_queue_status
+    ON etl_queue(status, etl_name);
+CREATE INDEX IF NOT EXISTS idx_etl_queue_entity
+    ON etl_queue(entity_type, entity_id);
+"""
+# ========================================================================
+# Table 2i:retry_policy
+# Retry Policy Tables (migration 032)
+# retry_policy: template policies loaded at seed time
+# task_retry_override: per-category max_retries override
+# ========================================================================
+CREATE_RETRY_POLICY = """
+CREATE TABLE IF NOT EXISTS retry_policy (
+    policy_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_name            TEXT NOT NULL UNIQUE,
+    max_retries            INTEGER NOT NULL DEFAULT 1,
+    retry_on_timeout       INTEGER NOT NULL DEFAULT 1,
+    retry_on_tool_error    INTEGER NOT NULL DEFAULT 1,
+    retry_on_api_error     INTEGER NOT NULL DEFAULT 1,
+    retry_on_wrong_answer  INTEGER NOT NULL DEFAULT 0,
+    backoff_seconds        REAL NOT NULL DEFAULT 0.0,
+    created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_retry_policy_name
+    ON retry_policy(policy_name);
+"""
+ 
+# ========================================================================
+# Table 2j:task_retry_override
+# task_retry_override — per-category max_retries override
+# Takes precedence over template policy max_retries only.
+# ========================================================================
+CREATE_TASK_RETRY_OVERRIDE = """
+CREATE TABLE IF NOT EXISTS task_retry_override (
+    task_category   TEXT PRIMARY KEY,
+    max_retries     INTEGER NOT NULL,
+    policy_name     TEXT NOT NULL,
+    FOREIGN KEY (policy_name) REFERENCES retry_policy(policy_name)
+);
+"""
+# ========================================================================
+# Table 3: idle_baselines
+# ========================================================================
+CREATE_IDLE_BASELINES = """
+CREATE TABLE IF NOT EXISTS idle_baselines (
+    baseline_id TEXT PRIMARY KEY,
+    timestamp REAL NOT NULL,
+    package_power_watts REAL,
+    core_power_watts REAL,
+    uncore_power_watts REAL,
+    dram_power_watts REAL,
+    duration_seconds INTEGER,
+    sample_count INTEGER,
+    package_std REAL,
+    core_std REAL,
+    uncore_std REAL,
+    dram_std REAL,
+    governor TEXT,
+    turbo TEXT,
+    background_cpu REAL,
+    process_count INTEGER,
+    method TEXT,
+    -- GPU idle power — NULL if no GPU measurement on this platform
+    -- gpu_method distinguishes MSR PP1 (Tiger Lake) vs DCGM f156 (GN100) vs IOKit
+    gpu_power_watts REAL,   -- mean GPU idle power in Watts
+    gpu_std         REAL,   -- std dev of GPU idle power samples
+    -- v61 additions: platform-agnostic domain storage
+    gpu_method      TEXT,   -- 'msr_pp1' | 'dcgm_f156' | 'iokit' | NULL
+    std_dev_json    TEXT    -- JSON dump of full std_dev_watts for all domains
+);
+"""
+
+# =============================================================================
+# idle_baseline_domains — normalized domain storage (v61)
+# =============================================================================
+CREATE_IDLE_BASELINE_DOMAINS = """
+CREATE TABLE IF NOT EXISTS idle_baseline_domains (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    baseline_id TEXT    NOT NULL REFERENCES idle_baselines(baseline_id),
+    domain_id   INTEGER NOT NULL REFERENCES energy_domains(domain_id),
+    power_watts REAL    NOT NULL,
+    std_watts   REAL    NOT NULL DEFAULT 0.0,
+    UNIQUE(baseline_id, domain_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ibd_baseline_id ON idle_baseline_domains(baseline_id);
+CREATE INDEX IF NOT EXISTS idx_ibd_domain_id   ON idle_baseline_domains(domain_id);
+"""
+ 
+# v_idle_baselines: backward-compatible view over normalized storage
+CREATE_V_IDLE_BASELINES = """
+CREATE VIEW IF NOT EXISTS v_idle_baselines AS
+SELECT
+    ib.baseline_id, ib.timestamp, ib.duration_seconds, ib.sample_count,
+    ib.method, ib.gpu_method, ib.governor, ib.turbo,
+    ib.background_cpu, ib.process_count,
+    COALESCE(ib.package_power_watts,
+        (SELECT ibd.power_watts FROM idle_baseline_domains ibd
+         JOIN energy_domains ed ON ed.domain_id = ibd.domain_id
+         WHERE ibd.baseline_id = ib.baseline_id AND ed.name = 'PACKAGE')
+    ) AS package_power_watts,
+    COALESCE(ib.core_power_watts,
+        (SELECT ibd.power_watts FROM idle_baseline_domains ibd
+         JOIN energy_domains ed ON ed.domain_id = ibd.domain_id
+         WHERE ibd.baseline_id = ib.baseline_id AND ed.name IN ('CORE','CPU_P')
+         LIMIT 1)
+    ) AS core_power_watts,
+    COALESCE(ib.dram_power_watts,
+        (SELECT ibd.power_watts FROM idle_baseline_domains ibd
+         JOIN energy_domains ed ON ed.domain_id = ibd.domain_id
+         WHERE ibd.baseline_id = ib.baseline_id AND ed.name = 'DRAM')
+    ) AS dram_power_watts,
+    COALESCE(ib.uncore_power_watts,
+        (SELECT ibd.power_watts FROM idle_baseline_domains ibd
+         JOIN energy_domains ed ON ed.domain_id = ibd.domain_id
+         WHERE ibd.baseline_id = ib.baseline_id AND ed.name = 'UNCORE')
+    ) AS uncore_power_watts,
+    COALESCE(ib.gpu_power_watts,
+        (SELECT ibd.power_watts FROM idle_baseline_domains ibd
+         JOIN energy_domains ed ON ed.domain_id = ibd.domain_id
+         WHERE ibd.baseline_id = ib.baseline_id AND ed.name = 'GPU')
+    ) AS gpu_power_watts,
+    ib.package_std, ib.core_std, ib.dram_std, ib.uncore_std, ib.gpu_std
+FROM idle_baselines ib;
+"""
+ 
+CREATE_V_IDLE_BASELINE_DOMAINS = """
+CREATE VIEW IF NOT EXISTS v_idle_baseline_domains AS
+SELECT
+    ibd.baseline_id,
+    ed.name         AS domain_name,
+    ibd.power_watts,
+    ibd.std_watts,
+    ib.timestamp,
+    ib.method,
+    ib.gpu_method
+FROM idle_baseline_domains ibd
+JOIN energy_domains  ed ON ed.domain_id   = ibd.domain_id
+JOIN idle_baselines  ib ON ib.baseline_id = ibd.baseline_id;
+"""
+ 
+CREATE_V_PLATFORM_BASELINE_SUMMARY = """
+CREATE VIEW IF NOT EXISTS v_platform_baseline_summary AS
+SELECT
+    ib.baseline_id,
+    ib.timestamp,
+    COUNT(ibd.id)               AS domain_count,
+    GROUP_CONCAT(ed.name, ', ') AS domains_measured,
+    ib.method,
+    ib.gpu_method,
+    ib.governor
+FROM idle_baselines ib
+LEFT JOIN idle_baseline_domains ibd ON ibd.baseline_id = ib.baseline_id
+LEFT JOIN energy_domains        ed  ON ed.domain_id    = ibd.domain_id
+GROUP BY ib.baseline_id;
+"""
+
+# Unified multi-platform energy schema (SPEC_ENERGY_SCHEMA_V2)
+# All new platforms write here. Existing energy_samples untouched.
+ 
+CREATE_ENERGY_SOURCES = """
+CREATE TABLE IF NOT EXISTS energy_sources (
+    source_id    INTEGER PRIMARY KEY,
+    name         TEXT    NOT NULL UNIQUE,
+    description  TEXT,
+    confidence   REAL    NOT NULL DEFAULT 1.0,
+    provenance   TEXT    NOT NULL DEFAULT 'MEASURED',
+    layer        TEXT    NOT NULL DEFAULT 'silicon'
+);
+"""
+ 
+CREATE_ENERGY_DOMAINS = """
+CREATE TABLE IF NOT EXISTS energy_domains (
+    domain_id             INTEGER PRIMARY KEY,
+    name                  TEXT    NOT NULL UNIQUE,
+    description           TEXT,
+    parent_domain_id      INTEGER REFERENCES energy_domains(domain_id),
+    is_leaf               BOOLEAN NOT NULL DEFAULT 1,
+    is_cumulative         BOOLEAN NOT NULL DEFAULT 1,
+    unit                  TEXT    NOT NULL DEFAULT 'uj',
+    reader_keys           TEXT,
+    legacy_column         TEXT
+);
+"""
+ 
+# Narrow table — hot path during measurement (thousands of rows per run)
+CREATE_ENERGY_SAMPLES_V2 = """
+CREATE TABLE IF NOT EXISTS energy_samples_v2 (
+    sample_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        INTEGER NOT NULL REFERENCES runs(run_id),
+    global_run_id TEXT,
+    source_id     INTEGER NOT NULL REFERENCES energy_sources(source_id),
+    timestamp_ns  BIGINT  NOT NULL,
+    interval_ns   BIGINT  NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_esv2_run
+    ON energy_samples_v2(run_id);
+CREATE INDEX IF NOT EXISTS idx_esv2_run_source
+    ON energy_samples_v2(run_id, source_id);
+CREATE INDEX IF NOT EXISTS idx_esv2_time
+    ON energy_samples_v2(run_id, timestamp_ns);
+"""
+ 
+# Raw domain values only — never derived quantities
+CREATE_ENERGY_SAMPLE_DOMAINS = """
+CREATE TABLE IF NOT EXISTS energy_sample_domains (
+    sample_id     INTEGER NOT NULL REFERENCES energy_samples_v2(sample_id),
+    run_id        INTEGER NOT NULL,
+    global_run_id TEXT,
+    domain_id     INTEGER NOT NULL REFERENCES energy_domains(domain_id),
+    source_id     INTEGER NOT NULL REFERENCES energy_sources(source_id),
+    energy_uj     REAL    NOT NULL,
+    PRIMARY KEY (sample_id, domain_id, source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_esd_run
+    ON energy_sample_domains(run_id);
+CREATE INDEX IF NOT EXISTS idx_esd_domain
+    ON energy_sample_domains(domain_id, run_id);
+"""
+ 
+# ETL-computed quantities — never raw measurements
+CREATE_ENERGY_DERIVED_METRICS = """
+CREATE TABLE IF NOT EXISTS energy_derived_metrics (
+    metric_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id             INTEGER NOT NULL REFERENCES runs(run_id),
+    global_run_id      TEXT,
+    sample_id          INTEGER REFERENCES energy_samples_v2(sample_id),
+    metric_name        TEXT    NOT NULL,
+    value_uj           REAL,
+    derivation_formula TEXT    NOT NULL,
+    source_ids_used    TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_edm_run
+    ON energy_derived_metrics(run_id);
+CREATE INDEX IF NOT EXISTS idx_edm_metric
+    ON energy_derived_metrics(run_id, metric_name);
+"""
+ 
+# Instantaneous device state — power, temperature, utilization, clock
+CREATE_DEVICE_TELEMETRY = """
+CREATE TABLE IF NOT EXISTS device_telemetry (
+    telemetry_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        INTEGER NOT NULL REFERENCES runs(run_id),
+    global_run_id TEXT,
+    source_id     INTEGER NOT NULL REFERENCES energy_sources(source_id),
+    timestamp_ns  BIGINT  NOT NULL,
+    interval_ns   BIGINT  NOT NULL,
+    device_type   TEXT    NOT NULL,
+    power_mw      REAL,
+    energy_uj     REAL,
+    util_pct      REAL,
+    temp_c        REAL,
+    clock_mhz     REAL,
+    dc_input_mw   REAL,
+    mem_util_pct  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_dt_run
+    ON device_telemetry(run_id);
+CREATE INDEX IF NOT EXISTS idx_dt_run_device
+    ON device_telemetry(run_id, device_type);
+"""
+ 
+# Platform topology — which domains contribute to which root per machine
+CREATE_PLATFORM_DOMAIN_RELATIONSHIPS = """
+CREATE TABLE IF NOT EXISTS platform_domain_relationships (
+    hw_id                 INTEGER NOT NULL REFERENCES hardware_config(hw_id),
+    hardware_hash         TEXT    NOT NULL,
+    source_id             INTEGER NOT NULL REFERENCES energy_sources(source_id),
+    domain_id             INTEGER NOT NULL REFERENCES energy_domains(domain_id),
+    parent_domain_id      INTEGER REFERENCES energy_domains(domain_id),
+    contributes_to_parent BOOLEAN NOT NULL DEFAULT 1,
+    PRIMARY KEY (hw_id, source_id, domain_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pdr_hash
+    ON platform_domain_relationships(hardware_hash, source_id, domain_id);
+"""
+ 
+# Unified query surface — legacy RAPL rows + new normalized rows.
+# CORRECTED (schema.py/migrations divergence fix, see v092): this must
+# stay byte-identical to migrations/schema/v092_v_energy_view_fix.sql's
+# view body forever. If v_energy is ever changed again, change both
+# files in the same commit — this exact drift (schema.py silently
+# falling behind a migration fix) is what broke debian-vm/fedora-vm.
+CREATE_V_ENERGY_VIEW = """
+CREATE VIEW IF NOT EXISTS v_energy AS
+SELECT
+    esv2.sample_id,
+    esv2.run_id,
+    esv2.timestamp_ns,
+    esv2.interval_ns,
+    src.name                                                        AS source_name,
+    MAX(CASE WHEN esd.domain_id = 1  THEN esd.energy_uj END)       AS package_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 2  THEN esd.energy_uj END)       AS core_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 3  THEN esd.energy_uj END)       AS uncore_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 4  THEN esd.energy_uj END)       AS dram_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 5  THEN esd.energy_uj END)       AS cpu_p_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 6  THEN esd.energy_uj END)       AS cpu_e_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 7 AND esd.source_id = 2
+             THEN esd.energy_uj END)                                AS gpu_spbm_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 7 AND esd.source_id = 4
+             THEN esd.energy_uj END)                                AS gpu_dcgm_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 7 AND esd.source_id = 3
+             THEN esd.energy_uj END)                                AS gpu_nvml_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 7 AND esd.source_id = 7
+             THEN esd.energy_uj END)                                AS gpu_smi_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 7 AND esd.source_id = 8
+             THEN esd.energy_uj END)                                AS gpu_pp1_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 11 THEN esd.energy_uj END)       AS unified_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 12 THEN esd.energy_uj END)       AS cpu_apple_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 13 THEN esd.energy_uj END)       AS gpu_apple_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 15 THEN esd.energy_uj END)       AS nvlink_c2c_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 8  THEN esd.energy_uj END)       AS ccd0_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 9  THEN esd.energy_uj END)       AS ccd1_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 10 THEN esd.energy_uj END)       AS iodie_energy_uj,
+    MAX(CASE WHEN esd.domain_id = 20 THEN esd.energy_uj END)       AS dla_energy_uj
+FROM energy_samples_v2 esv2
+JOIN energy_sources        src ON src.source_id = esv2.source_id
+JOIN energy_sample_domains esd ON esd.sample_id = esv2.sample_id
+GROUP BY
+    esv2.sample_id,
+    esv2.run_id,
+    esv2.timestamp_ns,
+    esv2.interval_ns,
+    src.name
+UNION ALL
+SELECT
+    es.sample_id,
+    es.run_id,
+    es.timestamp_ns,
+    es.interval_ns,
+    'RAPL'                  AS source_name,
+    es.pkg_energy_uj        AS package_energy_uj,
+    es.core_energy_uj,
+    es.uncore_energy_uj,
+    es.dram_energy_uj,
+    NULL                    AS cpu_p_energy_uj,
+    NULL                    AS cpu_e_energy_uj,
+    NULL                    AS gpu_spbm_energy_uj,
+    NULL                    AS gpu_dcgm_energy_uj,
+    NULL                    AS gpu_nvml_energy_uj,
+    NULL                    AS gpu_smi_energy_uj,
+    es.gpu_energy_uj        AS gpu_pp1_energy_uj,
+    NULL                    AS unified_energy_uj,
+    NULL                    AS cpu_apple_energy_uj,
+    NULL                    AS gpu_apple_energy_uj,
+    NULL                    AS nvlink_c2c_energy_uj,
+    NULL                    AS ccd0_energy_uj,
+    NULL                    AS ccd1_energy_uj,
+    NULL                    AS iodie_energy_uj,
+    NULL                    AS dla_energy_uj
+FROM energy_samples es;
+"""
+CREATE_POWER_RAILS = """
+CREATE TABLE IF NOT EXISTS power_rails (
+    rail_id        INTEGER PRIMARY KEY,
+    rail_name      TEXT NOT NULL UNIQUE,
+    device_type    TEXT NOT NULL,
+    parent_rail_id INTEGER REFERENCES power_rails(rail_id),
+    rail_kind      TEXT NOT NULL DEFAULT 'POWER',
+    hwmon_channel  TEXT,
+    hw_config_key  TEXT,
+    notes          TEXT
+);
+"""
+ 
+CREATE_POWER_LIMITS = """
+CREATE TABLE IF NOT EXISTS power_limits (
+    limit_id    INTEGER PRIMARY KEY,
+    limit_name  TEXT NOT NULL UNIQUE,
+    description TEXT,
+    units       TEXT NOT NULL DEFAULT 'mw'
+);
+"""
+ 
+CREATE_POWER_RAIL_SAMPLES = """
+CREATE TABLE IF NOT EXISTS power_rail_samples (
+    rail_sample_id INTEGER PRIMARY KEY,
+    run_id         INTEGER NOT NULL,
+    timestamp_ns   INTEGER NOT NULL,
+    interval_ns    INTEGER,
+    rail_id        INTEGER NOT NULL REFERENCES power_rails(rail_id),
+    power_mw       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prs_run_time
+    ON power_rail_samples(run_id, timestamp_ns);
+CREATE INDEX IF NOT EXISTS idx_prs_rail
+    ON power_rail_samples(rail_id, run_id);
+"""
+ 
+CREATE_RUN_POWER_LIMITS = """
+CREATE TABLE IF NOT EXISTS run_power_limits (
+    run_id    INTEGER NOT NULL,
+    limit_id  INTEGER NOT NULL REFERENCES power_limits(limit_id),
+    value_mw  REAL NOT NULL,
+    PRIMARY KEY (run_id, limit_id)
+);
+"""
+ 
+CREATE_POWER_LIMIT_EVENTS = """
+CREATE TABLE IF NOT EXISTS power_limit_events (
+    event_id     INTEGER PRIMARY KEY,
+    run_id       INTEGER NOT NULL,
+    timestamp_ns INTEGER NOT NULL,
+    limit_id     INTEGER NOT NULL REFERENCES power_limits(limit_id),
+    old_value_mw REAL,
+    new_value_mw REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ple_run_time
+    ON power_limit_events(run_id, timestamp_ns);
+"""
+
+CREATE_GPU_SAMPLES = """
+CREATE TABLE IF NOT EXISTS gpu_samples (
+    sample_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id           INTEGER NOT NULL REFERENCES runs(run_id),
+    gpu_index        INTEGER NOT NULL DEFAULT 0,
+    sample_start_ns  BIGINT NOT NULL,
+    sample_end_ns    BIGINT NOT NULL,
+    interval_ns      BIGINT NOT NULL,
+    energy_start_uj  BIGINT,
+    energy_end_uj    BIGINT,
+    energy_uj        BIGINT,
+    power_mw         INTEGER,
+    util_gpu_pct     REAL,
+    util_mem_pct     REAL,
+    sm_clock_mhz     INTEGER,
+    mem_clock_mhz    INTEGER,
+    mem_used_mb      INTEGER,
+    temperature_c    INTEGER,
+    source           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gpu_samples_run
+    ON gpu_samples(run_id);
+CREATE INDEX IF NOT EXISTS idx_gpu_samples_time
+    ON gpu_samples(run_id, sample_start_ns);
+"""
+ 
+# ============================================================
+# CREATE_GPU_CONFIG constant
+# ============================================================
+ 
+CREATE_GPU_CONFIG = """
+CREATE TABLE IF NOT EXISTS gpu_config (
+    gpu_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    gpu_index         INTEGER NOT NULL DEFAULT 0,
+    vendor            TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    driver_version    TEXT,
+    cuda_version      TEXT,
+    rocm_version      TEXT,
+    vbios_version     TEXT,
+    pci_id            TEXT,
+    memory_total_mb   INTEGER,
+    energy_supported  INTEGER NOT NULL DEFAULT 0,
+    backend           TEXT,
+    gpu_hash          TEXT NOT NULL,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(gpu_index, gpu_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_gpu_config_vendor
+    ON gpu_config(vendor);
+"""
+ 
+
+# ========================================================================
+# Table 4: runs (core table with 70+ columns)
+# ========================================================================
+CREATE_RUNS = """
+CREATE TABLE IF NOT EXISTS runs (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exp_id INTEGER NOT NULL,
+    hw_id INTEGER,
+    baseline_id TEXT,
+    run_number INTEGER,
+    workflow_type TEXT NOT NULL,
+
+    -- Timing (all in nanoseconds)
+    start_time_ns INTEGER,
+    end_time_ns INTEGER,
+    duration_ns INTEGER,
+
+    -- Energy (all in microjoules)
+    total_energy_uj INTEGER,
+    dynamic_energy_uj INTEGER,
+    baseline_energy_uj INTEGER,
+    avg_power_watts REAL,
+    pkg_energy_uj INTEGER,      -- Raw package energy
+    core_energy_uj INTEGER,      -- Raw core energy
+    uncore_energy_uj INTEGER,    -- Raw uncore energy
+    dram_energy_uj INTEGER,      -- Raw DRAM energy
+    -- Performance counters
+    instructions BIGINT,
+    cycles BIGINT,
+    ipc REAL,
+    cache_misses BIGINT,
+    cache_references BIGINT,
+    cache_miss_rate REAL,
+    page_faults INTEGER,
+    major_page_faults INTEGER,
+    minor_page_faults INTEGER,
+
+    -- Scheduler metrics
+    context_switches_voluntary INTEGER,
+    context_switches_involuntary INTEGER,
+    total_context_switches INTEGER,
+    thread_migrations INTEGER,
+    run_queue_length REAL,
+    kernel_time_ms REAL,
+    user_time_ms REAL,
+
+    -- Frequency & ring bus
+    frequency_mhz REAL,
+    ring_bus_freq_mhz REAL,
+
+    -- CPU metrics (aggregated from samples)
+    cpu_busy_mhz REAL,
+    cpu_avg_mhz REAL,
+
+    -- Thermal metrics
+    package_temp_celsius REAL,
+    baseline_temp_celsius REAL,
+    start_temp_c REAL,
+    max_temp_c REAL,
+    min_temp_c REAL,
+    thermal_delta_c REAL,
+    thermal_during_experiment BOOLEAN,
+    thermal_now_active BOOLEAN,
+    thermal_since_boot BOOLEAN,
+    experiment_valid BOOLEAN,
+
+    -- C‑state residencies
+    c2_time_seconds REAL,
+    c3_time_seconds REAL,
+    c6_time_seconds REAL,
+    c7_time_seconds REAL,
+
+    --swap metrics
+    swap_total_mb REAL,
+    swap_end_free_mb REAL,
+    swap_start_used_mb REAL,
+    swap_end_used_mb REAL,
+    swap_start_cached_mb REAL,
+    swap_end_cached_mb REAL,
+    swap_end_percent REAL,
+
+    -- MSR / wakeup
+    wakeup_latency_us REAL,
+    interrupt_rate REAL,
+    thermal_throttle_flag INTEGER,
+
+    -- Memory usage
+    rss_memory_mb REAL,
+    vms_memory_mb REAL,
+
+    -- Token counts
+    total_tokens INTEGER,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+
+    -- Network latencies
+    dns_latency_ms REAL,
+    api_latency_ms REAL,
+    compute_time_ms REAL,
+    -- Network metrics (NEW)
+    bytes_sent INTEGER,
+    bytes_recv INTEGER,
+    tcp_retransmits INTEGER,
+
+    -- System state
+    governor TEXT,
+    turbo_enabled BOOLEAN,
+    is_cold_start BOOLEAN,
+    background_cpu_percent REAL,
+    process_count INTEGER,
+    cpu_active_ratio REAL,
+
+    -- Agentic‑specific metrics (NULL for linear runs)
+    planning_time_ms REAL,
+    execution_time_ms REAL,
+    synthesis_time_ms REAL,
+    phase_planning_ratio REAL,
+    phase_execution_ratio REAL,
+    phase_synthesis_ratio REAL,
+    llm_calls INTEGER,
+    tool_calls INTEGER,
+    tools_used INTEGER,
+    steps INTEGER,
+    avg_step_time_ms REAL,
+    orchestration_cpu_ms REAL,
+    complexity_level INTEGER,
+    complexity_score REAL,
+
+    -- Sustainability metrics
+    carbon_g REAL,
+    water_ml REAL,
+    methane_mg REAL,
+
+    -- Derived efficiency metrics
+    energy_per_instruction REAL,
+    energy_per_cycle REAL,
+    energy_per_token REAL,
+    instructions_per_token REAL,
+    interrupts_per_second REAL,
+
+    -- Cryptographic run state hash
+    run_state_hash TEXT,
+    pid                     INTEGER,          -- PID of workload process
+    cpu_fraction            REAL,             -- workload_ticks / total_ticks
+    attributed_energy_uj    INTEGER,           -- cpu_fraction × dynamic_energy_uj 
+    energy_measurement_mode TEXT,               -- MEASURED / INFERRED / LIMITED 
+    planning_energy_uj      INTEGER,            -- Chunk 5: attributed phase energy
+    execution_energy_uj     INTEGER,
+    synthesis_energy_uj     INTEGER,  
+    inter_phase_energy_uj     INTEGER,          -- Phase v2: E_attributed - SUM(phases) — honest residual
+    phase_sample_coverage_pct REAL,             -- Phase v2: % of run samples inside phase windows
+    l1d_cache_misses_total  BIGINT,  -- Chunk 12: SUM from cpu_samples
+    l2_cache_misses_total   BIGINT,
+    l3_cache_hits_total     BIGINT,
+    l3_cache_misses_total   BIGINT,
+    disk_read_bytes_total   BIGINT,  -- Chunk 12: SUM from io_samples
+    disk_write_bytes_total  BIGINT,
+    voltage_vcore_avg       REAL,     -- Chunk 12: AVG from thermal_samples
+    -- ── v9: Measurement Boundary ─────────────────────────────────────────────
+    task_duration_ns              INTEGER,  -- t1-t0: executor only (canonical denominator)
+    framework_overhead_ns         INTEGER,  -- pre + post instrumentation wall time
+    total_run_duration_ns         INTEGER,  -- t2-t0: full wall clock
+    duration_includes_overhead    INTEGER DEFAULT 1,  -- 1=historical, 0=corrected
+    energy_sample_coverage_pct    REAL,     -- sample_span/task_duration × 100
+    avg_task_power_watts          REAL,     -- pkg_energy / task_duration (correct)
+
+    -- ── Pre-task window (t_before → t0) ──────────────────────────────────────
+    rapl_before_pretask_uj        INTEGER,  -- raw RAPL pkg before instrumentation reads
+    rapl_at_t0_uj                 INTEGER,  -- raw RAPL pkg at start_measurement() — t0 anchor
+    measurement_log_level         TEXT,     -- v119: effective log level inside the gate (INV-P1)
+    measurement_log_config_hash   TEXT,     -- v119: hash of the effective logging config
+    observability_overflow        INTEGER,  -- v119: NULL not recorded, 0 none, 1 non lossy overflow
+    measurement_heartbeat_s       REAL,     -- v122: status line interval inside the gate; NULL not recorded, 0 off
+    pre_task_energy_uj            INTEGER,  -- attributed: (delta - baseline) * cpu_frac
+    pre_task_duration_ns          INTEGER,  -- t0 - t_before
+
+    -- ── Post-task window (t1 → t2) ───────────────────────────────────────────
+    rapl_after_task_uj            INTEGER,  -- raw RAPL pkg after executor returns
+    post_task_energy_uj           INTEGER,  -- attributed: (delta - baseline) * cpu_frac
+    post_task_duration_ns         INTEGER,  -- t2 - t1
+
+    -- ── Framework overhead summary ────────────────────────────────────────────
+    framework_overhead_energy_uj  INTEGER,  -- pre + post energy (diagnostic only)
+    -- GPU PP1 energy via MSR 0x641 (Intel Iris Xe, Tiger Lake) — ETL populated
+    gpu_total_energy_uj           INTEGER,  -- SUM(gpu_energy_uj) over all energy_samples for run
+    gpu_baseline_energy_uj        INTEGER,  -- baseline_rate_gpu_uj_per_ns * run_duration_ns
+    gpu_dynamic_energy_uj         INTEGER,  -- gpu_total_energy_uj - gpu_baseline_energy_uj
+    gpu_pct_of_pkg                REAL,     -- gpu_dynamic_energy_uj / dynamic_energy_uj * 100
+    gpu_attribution_method        TEXT,     -- ETL populated: exclusive|utilization|none (15-C)
+    gpu_count                     INTEGER DEFAULT 0,  -- GPUs detected at run time
+    global_run_id                 TEXT,               -- cross-machine run correlation ID
+    sync_status                   INTEGER NOT NULL DEFAULT 0,  -- 0=local only, 1=synced
+    sync_samples_status           INTEGER NOT NULL DEFAULT 0,  -- 0=local only, 1=synced
+        -- ── LLM streaming timing (universal, all platforms) ──────────────────────
+    ttft_ms                        REAL,     -- time to first token
+    tpot_ms                        REAL,     -- time per output token
+    -- ── SPBM-specific (GN100/Grace only, NULL on all other platforms) ────────
+    gpu_dynamic_method             TEXT,     -- provenance: RUN_LOCAL_IDLE | EXTERNAL_IDLE_BASELINE
+    gpu_idle_power_w_used          REAL,     -- idle baseline power actually used for this run
+    gpu_spbm_total_uj              INTEGER,  -- SPBM broad-rail GPU energy (includes memory+NVLink)
+    gpu_spbm_dynamic_uj            INTEGER,  -- SPBM dynamic (baseline-subtracted)
+    gpu_residual_dynamic_uj        INTEGER,  -- SPBM dynamic minus DCGM dynamic, not clamped to zero
+    spbm_power_sampling_freq_hz    REAL,     -- actual SPBM sample rate achieved this run
+    spbm_samples_expected          INTEGER,  -- coverage: expected sample count
+    spbm_samples_observed          INTEGER,  -- coverage: actual sample count
+    spbm_sample_coverage_pct       REAL,     -- samples_observed / samples_expected * 100
+    spbm_integration_method        TEXT,     -- how power channels were integrated to energy
+    spbm_conversion_loss_uj        INTEGER,  -- dc_input minus pkg, conversion loss estimate
+    spbm_conversion_efficiency     REAL,     -- pkg / dc_input
+
+    FOREIGN KEY(exp_id) REFERENCES experiments(exp_id),
+    FOREIGN KEY(hw_id) REFERENCES hardware_config(hw_id),
+    FOREIGN KEY(baseline_id) REFERENCES idle_baselines(baseline_id)
+);
+"""
+
+# ========================================================================
+# Indexes for runs table
+# ========================================================================
+CREATE_RUNS_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_runs_exp_id ON runs(exp_id);
+CREATE INDEX IF NOT EXISTS idx_runs_hw_id ON runs(hw_id);
+CREATE INDEX IF NOT EXISTS idx_runs_energy ON runs(total_energy_uj);
+CREATE INDEX IF NOT EXISTS idx_runs_ipc ON runs(ipc);
+CREATE INDEX IF NOT EXISTS idx_runs_interrupt ON runs(interrupt_rate);
+DROP INDEX IF EXISTS idx_runs_unique;  -- G137: one run per attempt; rule removed in v118
+"""
+
+# INV-D1 enforced by the store (v117): natural keys from
+# core/validation/persistence_keys.yaml. Executed after every table exists.
+CREATE_NATURAL_KEY_INDEXES = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nk_energy_samples_v2
+    ON energy_samples_v2(run_id, source_id, timestamp_ns);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nk_interrupt_samples
+    ON interrupt_samples(run_id, timestamp_ns);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nk_io_samples
+    ON io_samples(run_id, device, sample_start_ns);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nk_thermal_samples
+    ON thermal_samples(run_id, timestamp_ns);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nk_energy_derived_metrics
+    ON energy_derived_metrics(run_id, sample_id, metric_name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nk_llm_interactions
+    ON llm_interactions(run_id, step_index, request_start_ns);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nk_orchestration_events
+    ON orchestration_events(run_id, step_index, phase, event_type, start_time_ns);
+"""
+
+# ========================================================================
+# Table 5: orchestration_events
+# ========================================================================
+CREATE_ORCHESTRATION_EVENTS = """
+CREATE TABLE IF NOT EXISTS orchestration_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    step_index INTEGER,
+    phase TEXT CHECK(phase IN ('planning','execution','waiting','synthesis')),
+    event_type TEXT NOT NULL,
+    start_time_ns INTEGER NOT NULL,
+    end_time_ns INTEGER NOT NULL,
+    duration_ns INTEGER NOT NULL,
+    power_watts REAL,
+    cpu_util_percent REAL,
+    interrupt_rate REAL,
+    event_energy_uj INTEGER,
+    tax_contribution_uj INTEGER,
+    tax_percent REAL,
+    global_run_id TEXT,
+    raw_energy_uj           INTEGER,            -- Chunk 5: MAX(pkg_end)-MIN(pkg_start)
+    cpu_fraction_per_phase  REAL,               -- proc_ticks_delta / total_ticks_delta
+    attributed_energy_uj    INTEGER,            -- cpu_fraction x raw_energy_uj
+    attribution_method      TEXT,               -- cpu_counter_delta | fallback_run_level
+    quality_score           REAL,               -- 0.0-1.0 based on sample count
+    proc_ticks_min          INTEGER,
+    proc_ticks_max          INTEGER,
+    total_ticks_min         INTEGER,
+    total_ticks_max         INTEGER,    
+    created_at              TIMESTAMP,
+    tool_name               TEXT,                -- Populated by _execute_tool() via _emit_event() metadata backfill
+    io_bytes_read           INTEGER,
+    io_bytes_written        INTEGER,
+    
+    input_payload_hash      TEXT,                -- SHA-256 prefix hashes — reproducibility and dedup
+    output_payload_hash     TEXT,
+    
+    tool_success            INTEGER,             -- 1=success 0=failure — feeds v_failure_energy_taxonomy
+    
+    tool_result_rows        INTEGER,             -- Row count for database_query — correlates query size with energy
+    
+    tool_cpu_time_ns        INTEGER,             -- Per-tool CPU and memory — closes attribution black-box gap
+    tool_memory_delta_kb    INTEGER,
+    attempt_id              INTEGER REFERENCES goal_attempt(attempt_id),  -- Bug 7: per-attempt event attribution
+    agent_id                INTEGER,                                       -- P10 forward compat: multi-agent runs, NULL for all single-agent
+    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+);
+"""
+
+CREATE_EVENTS_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_events_run ON orchestration_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_events_phase ON orchestration_events(phase);
+CREATE INDEX IF NOT EXISTS idx_events_attempt ON orchestration_events(attempt_id);
+"""
+
+# ========================================================================
+# Table 6: orchestration_tax_summary
+# ========================================================================
+CREATE_TAX_SUMMARY = """
+CREATE TABLE IF NOT EXISTS orchestration_tax_summary (
+    comparison_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    linear_run_id INTEGER NOT NULL,
+    agentic_run_id INTEGER NOT NULL,
+    linear_dynamic_uj INTEGER,
+    agentic_dynamic_uj INTEGER,
+    orchestration_tax_uj INTEGER,
+    tax_percent REAL,
+    linear_orchestration_uj INTEGER,    -- ← ADD THIS
+    agentic_orchestration_uj INTEGER,   -- ← ADD THIS 
+    global_run_id               TEXT,    -- cross-machine run correlation ID   
+    FOREIGN KEY(linear_run_id) REFERENCES runs(run_id),
+    FOREIGN KEY(agentic_run_id) REFERENCES runs(run_id)
+);
+"""
+
+CREATE_TAX_INDEXES = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tax_pair ON orchestration_tax_summary(linear_run_id, agentic_run_id);
+"""
+
+# ========================================================================
+# Table 7: energy_samples
+# ========================================================================
+CREATE_ENERGY_SAMPLES = """
+CREATE TABLE IF NOT EXISTS energy_samples (
+    sample_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id           INTEGER NOT NULL,
+    timestamp_ns     INTEGER NOT NULL,
+    -- Old delta columns — kept for backward compatibility
+    pkg_energy_uj    INTEGER,
+    core_energy_uj   INTEGER,
+    uncore_energy_uj INTEGER,
+    dram_energy_uj   INTEGER,
+    -- Chunk 2: Raw start/end counter values per domain
+    pkg_start_uj     INTEGER,   -- RAPL package counter at sample start
+    pkg_end_uj       INTEGER,   -- RAPL package counter at sample end
+    core_start_uj    INTEGER,   -- RAPL core counter at sample start
+    core_end_uj      INTEGER,   -- RAPL core counter at sample end
+    dram_start_uj    INTEGER,   -- RAPL DRAM counter at sample start
+    dram_end_uj      INTEGER,   -- RAPL DRAM counter at sample end
+    uncore_start_uj  INTEGER,   -- RAPL uncore counter at sample start
+    uncore_end_uj    INTEGER,   -- RAPL uncore counter at sample end
+    sample_start_ns  INTEGER,   -- epoch ns at sample start (explicit)
+    sample_end_ns    INTEGER,   -- epoch ns at sample end (= timestamp_ns)
+    interval_ns      INTEGER,   -- exact elapsed ns between start and end reads
+    gpu_start_uj     INTEGER,   -- MSR 0x641 counter at sample start, NULL if unavailable
+    gpu_end_uj       INTEGER,   -- MSR 0x641 counter at sample end, NULL if unavailable
+    gpu_energy_uj    INTEGER,   -- (gpu_end - gpu_start) * 61.0352 µJ, ETL populated
+    global_run_id   TEXT,            -- cross-machine run correlation ID
+    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_energy_run_time ON energy_samples(run_id, timestamp_ns);
+"""
+
+# ========================================================================
+# Table 8: cpu_samples
+# ========================================================================
+# ========================================================================
+# Table 8: cpu_samples
+# ========================================================================
+CREATE_CPU_SAMPLES = """
+CREATE TABLE IF NOT EXISTS cpu_samples (
+    sample_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id           INTEGER NOT NULL,
+    timestamp_ns     INTEGER NOT NULL,
+    -- CPU Activity
+    cpu_util_percent REAL,
+    cpu_busy_mhz     REAL,
+    cpu_avg_mhz      REAL,
+    -- Core C-States
+    c1_residency     REAL,
+    c2_residency     REAL,
+    c3_residency     REAL,
+    c6_residency     REAL,
+    c7_residency     REAL,
+    -- Package C-States (deep sleep)
+    pkg_c8_residency  REAL,
+    pkg_c9_residency  REAL,
+    pkg_c10_residency REAL,
+    -- Power
+    package_power    REAL,
+    dram_power       REAL,
+    -- GPU
+    gpu_rc6          REAL,
+    -- Temperature & efficiency
+    package_temp     REAL,
+    ipc              REAL,
+    -- Provenance: which reader actually wrote this row
+    measurement_source TEXT,
+    l1d_cache_misses     BIGINT,     -- Chunk 12: L1d cache misses from perf
+    l2_cache_misses      BIGINT,     -- Chunk 12: L2 cache misses from perf
+    l3_cache_hits        BIGINT,     -- Chunk 12: L3 cache hits from perf
+    l3_cache_misses      BIGINT,      -- Chunk 12: L3 cache misses from perf    
+    -- JSON overflow for additional turbostat columns
+    extra_metrics_json TEXT,
+    global_run_id       TEXT,        -- cross-machine run correlation ID
+    -- Chunk 2: Interval tracking
+    sample_start_ns  INTEGER,          -- epoch ns at sample start (explicit)
+    sample_end_ns    INTEGER,          -- epoch ns at sample end (= timestamp_ns)
+    interval_ns      INTEGER,          -- elapsed ns for this turbostat sample
+    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cpu_samples_run_id ON cpu_samples(run_id);
+CREATE INDEX IF NOT EXISTS idx_cpu_samples_timestamp ON cpu_samples(run_id, timestamp_ns);
+"""
+
+# ========================================================================
+# Table 9: interrupt_samples
+# ========================================================================
+CREATE_INTERRUPT_SAMPLES = """
+CREATE TABLE IF NOT EXISTS interrupt_samples (
+    sample_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id               INTEGER NOT NULL,
+    timestamp_ns         INTEGER NOT NULL,
+    -- Old rate column — kept for backward compatibility
+    interrupts_per_sec   REAL,
+    -- Chunk 2: Raw values + CPU ticks (Option B — same /proc/stat read)
+    interrupts_raw       INTEGER,   -- raw interrupt count delta
+    user_ticks_start     INTEGER,   -- /proc/stat user ticks at interval start
+    user_ticks_end       INTEGER,   -- /proc/stat user ticks at interval end
+    system_ticks_start   INTEGER,   -- /proc/stat system ticks at interval start
+    system_ticks_end     INTEGER,   -- /proc/stat system ticks at interval end
+    total_ticks_start    INTEGER,   -- /proc/stat sum(all fields) at interval
+    total_ticks_end      INTEGER,   -- /proc/stat sum(all fields) at interval end
+    proc_ticks_start     INTEGER,   -- /proc/[pid]/stat utime+stime at interval start
+    proc_ticks_end       INTEGER,    -- /proc/[pid]/stat utime+stime at interval end
+    global_run_id       TEXT,        -- cross-machine run correlation ID
+    sample_start_ns      INTEGER,   -- epoch ns at sample start (explicit)
+    sample_end_ns        INTEGER,   -- epoch ns at sample end (= timestamp_ns)
+    interval_ns          INTEGER,   -- exact elapsed ns for this sample
+    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_interrupt_run_time ON interrupt_samples(run_id, timestamp_ns);
+"""
+
+
+# ========================================================================
+# Table:10 thermal_samples - 1Hz thermal telemetry
+# ========================================================================
+THERMAL_SAMPLES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS thermal_samples (
+    sample_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id         INTEGER NOT NULL,
+    timestamp_ns   INTEGER NOT NULL,
+    sample_time_s  REAL,
+    cpu_temp       REAL,
+    system_temp    REAL,
+    wifi_temp      REAL,
+    throttle_event INTEGER DEFAULT 0,
+    voltage_vcore  REAL,             -- Chunk 12: Vcore voltage from hwmon sysfs
+    fan_rpm        INTEGER,           -- Chunk 12: Fan RPM from hwmon sysfs
+    global_run_id       TEXT,        -- cross-machine run correlation ID    
+    all_zones_json TEXT,
+    sensor_count   INTEGER,
+    -- Chunk 2: Interval tracking
+    sample_start_ns      INTEGER,   -- epoch ns at sample start (explicit)
+    sample_end_ns        INTEGER,   -- epoch ns at sample end (= timestamp_ns)
+    interval_ns    INTEGER,            -- elapsed ns for this thermal sample
+    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_thermal_run_time ON thermal_samples(run_id, timestamp_ns);
+"""
+# ========================================================================
+# View 11: ml_features (flattened for ML)
+# ========================================================================
+CREATE_ML_VIEW = """
+CREATE VIEW IF NOT EXISTS ml_features AS
+SELECT
+    -- ========================================================================
+    -- 1. Core identifiers (for joins)
+    -- ========================================================================
+    r.run_id,
+    r.exp_id,
+    e.group_id,
+    r.run_number,
+    r.workflow_type,
+    
+    -- ========================================================================
+    -- 2. Experiment metadata (from experiments table)
+    -- ========================================================================
+    e.task_name,
+    e.provider,
+    e.model_name,
+    e.country_code,
+    e.optimization_enabled,
+    
+    -- ========================================================================
+    -- 3. Hardware specs (from hardware_config)
+    -- ========================================================================
+    h.cpu_model,
+    h.cpu_cores,
+    h.cpu_threads,
+    h.cpu_architecture,
+    h.cpu_vendor,
+    h.cpu_family,
+    h.cpu_model_id,
+    h.cpu_stepping,
+    h.has_avx2,
+    h.has_avx512,
+    h.has_vmx,
+    h.gpu_model,
+    h.gpu_driver,
+    h.gpu_count,
+    h.ram_gb,
+    h.system_type,
+    h.system_manufacturer,
+    h.system_product,
+    h.virtualization_type,
+    h.microcode_version,
+    
+    -- ========================================================================
+    -- 4. Environment (from environment_config)
+    -- ========================================================================
+    env.python_version,
+    env.git_commit,
+    env.git_branch,
+    env.git_dirty,
+    env.numpy_version,
+    env.torch_version,
+    env.transformers_version,
+    
+    -- ========================================================================
+    -- 5. Timing (from runs)
+    -- ========================================================================
+    r.start_time_ns,
+    r.end_time_ns,
+    r.duration_ns,
+    r.duration_ns / 1e6 AS duration_ms,
+    
+    -- ========================================================================
+    -- 6. Energy metrics (from runs)
+    -- ========================================================================
+    r.total_energy_uj,
+    r.total_energy_uj / 1e6 AS total_energy_j,
+    r.dynamic_energy_uj,
+    r.dynamic_energy_uj / 1e6 AS dynamic_energy_j,
+    r.baseline_energy_uj,
+    r.baseline_energy_uj / 1e6 AS baseline_energy_j,
+    r.avg_power_watts,
+    r.pkg_energy_uj / 1e6 AS pkg_energy_j,
+    r.core_energy_uj / 1e6 AS core_energy_j,
+    r.uncore_energy_uj / 1e6 AS uncore_energy_j,
+    r.dram_energy_uj / 1e6 AS dram_energy_j,
+    
+    -- ========================================================================
+    -- 7. Performance counters (from runs)
+    -- ========================================================================
+    r.instructions,
+    r.cycles,
+    r.ipc,
+    r.cache_misses,
+    r.cache_references,
+    r.cache_miss_rate,
+    r.page_faults,
+    r.major_page_faults,
+    r.minor_page_faults,
+    
+    -- ========================================================================
+    -- 8. Scheduler metrics (from runs)
+    -- ========================================================================
+    r.context_switches_voluntary,
+    r.context_switches_involuntary,
+    r.total_context_switches,
+    r.thread_migrations,
+    r.run_queue_length,
+    r.kernel_time_ms,
+    r.user_time_ms,
+    
+    -- ========================================================================
+    -- 9. Frequency & bus (from runs)
+    -- ========================================================================
+    r.frequency_mhz,
+    r.ring_bus_freq_mhz,
+    r.cpu_busy_mhz,
+    r.cpu_avg_mhz,
+    
+    -- ========================================================================
+    -- 10. Thermal metrics (from runs)
+    -- ========================================================================
+    r.package_temp_celsius,
+    r.baseline_temp_celsius,
+    r.start_temp_c,
+    r.max_temp_c,
+    r.min_temp_c,
+    r.thermal_delta_c,
+    r.thermal_during_experiment,
+    r.thermal_now_active,
+    r.thermal_since_boot,
+    r.experiment_valid,
+    
+    -- ========================================================================
+    -- 11. C-state residencies (from runs)
+    -- ========================================================================
+    r.c2_time_seconds,
+    r.c3_time_seconds,
+    r.c6_time_seconds,
+    r.c7_time_seconds,
+    
+    -- ========================================================================
+    -- 12. Memory & swap (from runs)
+    -- ========================================================================
+    r.swap_total_mb,
+    r.swap_end_free_mb,
+    r.swap_start_used_mb,
+    r.swap_end_used_mb,
+    r.swap_start_cached_mb,
+    r.swap_end_cached_mb,
+    r.swap_end_percent,
+    r.rss_memory_mb,
+    r.vms_memory_mb,
+    
+    -- ========================================================================
+    -- 13. MSR & wakeup (from runs)
+    -- ========================================================================
+    r.wakeup_latency_us,
+    r.interrupt_rate,
+    r.thermal_throttle_flag,
+    
+    -- ========================================================================
+    -- 14. Token counts (from runs)
+    -- ========================================================================
+    r.total_tokens,
+    r.prompt_tokens,
+    r.completion_tokens,
+    
+    -- ========================================================================
+    -- 15. Network latencies (from runs)
+    -- ========================================================================
+    r.dns_latency_ms,
+    r.api_latency_ms,
+    r.compute_time_ms,
+    
+    -- ========================================================================
+    -- 16. Network metrics (NEW)
+    -- ========================================================================
+    r.bytes_sent,
+    r.bytes_recv,
+    r.tcp_retransmits,
+    
+    -- ========================================================================
+    -- 17. System state (from runs)
+    -- ========================================================================
+    r.governor,
+    r.turbo_enabled,
+    r.is_cold_start,
+    r.background_cpu_percent,
+    r.process_count,
+    
+    -- ========================================================================
+    -- 18. Agentic-specific metrics (from runs)
+    -- ========================================================================
+    r.planning_time_ms,
+    r.execution_time_ms,
+    r.synthesis_time_ms,
+    r.phase_planning_ratio,
+    r.phase_execution_ratio,
+    r.phase_synthesis_ratio,
+    r.llm_calls,
+    r.tool_calls,
+    r.tools_used,
+    r.steps,
+    r.avg_step_time_ms,
+    r.complexity_level,
+    r.complexity_score,
+    
+    -- ========================================================================
+    -- 19. Sustainability metrics (from runs)
+    -- ========================================================================
+    r.carbon_g,
+    r.water_ml,
+    r.methane_mg,
+    
+    -- ========================================================================
+    -- 20. Derived efficiency metrics (from runs)
+    -- ========================================================================
+    r.energy_per_instruction,
+    r.energy_per_cycle,
+    r.energy_per_token,
+    r.instructions_per_token,
+    r.interrupts_per_second,
+    
+    -- ========================================================================
+    -- 21. Baseline data (from idle_baselines)
+    -- ========================================================================
+    ib.package_power_watts AS baseline_package_power,
+    ib.core_power_watts AS baseline_core_power,
+    ib.uncore_power_watts AS baseline_uncore_power,
+    ib.dram_power_watts AS baseline_dram_power,
+    ib.governor AS baseline_governor,
+    ib.turbo AS baseline_turbo,
+    ib.background_cpu AS baseline_background_cpu,
+    ib.process_count AS baseline_process_count,
+    
+    -- ========================================================================
+    -- 22. Tax summary (target variable)
+    -- ========================================================================
+    ots.orchestration_tax_uj / 1e6 AS orchestration_tax_j,
+    ots.tax_percent,
+    
+    -- ========================================================================
+    -- 23. Cryptographic run state hash
+    -- ========================================================================
+    r.run_state_hash
+    
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN hardware_config h ON r.hw_id = h.hw_id
+LEFT JOIN environment_config env ON e.env_id = env.env_id
+LEFT JOIN idle_baselines ib ON r.baseline_id = ib.baseline_id
+LEFT JOIN orchestration_tax_summary ots ON r.run_id = ots.agentic_run_id;
+"""
+# ========================================================================
+# View: orchestration_analysis - Derived metrics for tax calculation
+# ========================================================================
+CREATE_ORCHESTRATION_ANALYSIS = """
+CREATE VIEW IF NOT EXISTS orchestration_analysis AS
+SELECT 
+    r.run_id,
+    r.exp_id,
+    r.workflow_type,
+    r.run_number,
+    
+    -- Raw energies (Joules)
+    r.pkg_energy_uj/1e6 as pkg_energy_j,
+    r.core_energy_uj/1e6 as core_energy_j,
+    r.uncore_energy_uj/1e6 as uncore_energy_j,
+    r.dram_energy_uj/1e6 as dram_energy_j,
+    
+    -- Timing
+    r.duration_ns/1e9 as duration_sec,
+    
+    -- Baseline values (idle energy during run)
+    ib.package_power_watts * (r.duration_ns/1e9) as baseline_pkg_j,
+    ib.core_power_watts * (r.duration_ns/1e9) as baseline_core_j,
+    ib.uncore_power_watts * (r.duration_ns/1e9) as baseline_uncore_j,
+    
+    -- Derived metrics (YOUR FORMULAS!)
+    (r.pkg_energy_uj/1e6) - (ib.package_power_watts * (r.duration_ns/1e9)) as workload_energy_j,
+    (r.core_energy_uj/1e6) - (ib.core_power_watts * (r.duration_ns/1e9)) as reasoning_energy_j,
+    (r.uncore_energy_uj/1e6) - (ib.uncore_power_watts * (r.duration_ns/1e9)) as orchestration_tax_j,
+    
+    -- Efficiency metrics
+    ((r.core_energy_uj/1e6) - (ib.core_power_watts * (r.duration_ns/1e9))) / 
+        (r.instructions/1e9) as joules_per_billion_instructions,
+    r.instructions * 1.0 / r.cycles as ipc,
+    r.cache_misses * 1.0 / r.cache_references as cache_miss_rate,
+    
+    -- Ratios (what proportion of energy went where?)
+    CASE 
+        WHEN (r.pkg_energy_uj/1e6) > 0 
+        THEN (r.core_energy_uj/1e6) / (r.pkg_energy_uj/1e6) 
+        ELSE 0 
+    END as core_share,
+    
+    CASE 
+        WHEN (r.pkg_energy_uj/1e6) > 0 
+        THEN (r.uncore_energy_uj/1e6) / (r.pkg_energy_uj/1e6) 
+        ELSE 0 
+    END as uncore_share,
+    
+    -- Metadata
+    e.provider,
+    e.task_name,
+    e.country_code
+
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+JOIN idle_baselines ib ON r.baseline_id = ib.baseline_id
+WHERE r.baseline_id IS NOT NULL;
+"""
+
+# ========================================================================
+# Table: task_categories - Task to category mapping for analysis
+# ========================================================================
+TASK_CATEGORIES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS task_categories (
+    task_id TEXT PRIMARY KEY,
+    category TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_categories_id ON task_categories(task_id);
+"""
+# Add new columns to hardware_config table
+CREATE_HARDWARE_CONFIG = """
+CREATE TABLE IF NOT EXISTS hardware_config (
+    hw_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hardware_hash TEXT UNIQUE,              
+    hostname TEXT,
+    cpu_model TEXT,
+    cpu_cores INTEGER,
+    cpu_threads INTEGER,
+    cpu_architecture TEXT,                  
+    cpu_vendor TEXT,                         
+    cpu_family INTEGER,                      
+    cpu_model_id INTEGER,                    
+    cpu_stepping INTEGER,                    
+    has_avx2 BOOLEAN,                        
+    has_avx512 BOOLEAN,                      
+    has_vmx BOOLEAN,                         
+    gpu_model TEXT,                          
+    gpu_driver TEXT,                          
+    gpu_count INTEGER,                        
+    gpu_power_available BOOLEAN,              
+    ram_gb REAL,
+    kernel_version TEXT,
+    microcode_version TEXT,
+    rapl_domains TEXT,
+    rapl_has_dram BOOLEAN,                   
+    rapl_has_uncore BOOLEAN,                  
+    system_manufacturer TEXT,                 
+    system_product TEXT,                      
+    system_type TEXT,                         
+    virtualization_type TEXT,                  
+    detected_at 
+    last_seen           TIMESTAMP,   -- last heartbeat from this machine
+    agent_status        TEXT,        -- 'active'|'inactive'|'unreachable'
+    agent_version       TEXT,        -- A-LEMS agent version on this machine
+    server_hw_id        INTEGER,     -- hw_id on central server (future sync)         
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+# Add environment_config table (NEW)
+CREATE_ENVIRONMENT_CONFIG = """
+CREATE TABLE IF NOT EXISTS environment_config (
+    env_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    env_hash TEXT UNIQUE,
+    python_version TEXT,
+    python_implementation TEXT,
+    os_name TEXT,
+    os_version TEXT,
+    kernel_version TEXT,
+    llm_framework TEXT,
+    framework_version TEXT,
+    git_commit TEXT,
+    git_branch TEXT,
+    git_dirty BOOLEAN,
+    numpy_version TEXT,
+    torch_version TEXT,
+    transformers_version TEXT,
+    container_runtime TEXT,
+    container_image TEXT,
+    schema_version INTEGER DEFAULT 8,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+CREATE_SCHEMA_VERSION = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version     INTEGER PRIMARY KEY,
+    applied_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    description TEXT
+);
+"""
+
+# ========================================================================
+# Table: llm_interactions - Store prompts, responses, and per-call metrics
+# ========================================================================
+CREATE_LLM_INTERACTIONS = """
+CREATE TABLE IF NOT EXISTS llm_interactions (
+    interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    step_index INTEGER,
+    workflow_type TEXT,
+    prompt TEXT,
+    response TEXT,
+    model_name TEXT,
+    provider TEXT,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER,
+    
+    -- Existing (keep)
+    api_latency_ms REAL,
+    compute_time_ms REAL,
+    
+    -- Renamed
+    app_throughput_kbps REAL,
+    
+    -- NEW columns
+    total_time_ms REAL,
+    preprocess_ms REAL,
+    non_local_ms REAL,
+    local_compute_ms REAL,
+    postprocess_ms REAL,
+    cpu_percent_during_wait REAL,
+    ttft_ms REAL,                        -- time to first token in ms (MEASURED)
+    tpot_ms REAL,                        -- time per output token in ms (CALCULATED)
+    token_throughput REAL,               -- tokens/sec during decode (CALCULATED)
+    streaming_enabled INTEGER DEFAULT 0, -- 1 if streaming was used (SYSTEM)
+    first_token_time_ns INTEGER,         -- epoch ns of first token arrival (MEASURED)
+    last_token_time_ns INTEGER,          -- epoch ns of last token arrival (MEASURED)
+    request_start_ns    INTEGER,         -- LLM call start — enables prefill window [request_start..first_token]
+    prefill_energy_uj INTEGER,           -- RAPL energy during prefill phase (CALCULATED)    
+    bytes_sent_approx INTEGER,
+    bytes_recv_approx INTEGER,
+    tcp_retransmits INTEGER,
+    error_message TEXT,
+    status TEXT,
+    global_run_id TEXT,               -- cross-machine run correlation ID
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_run ON llm_interactions(run_id);
+CREATE INDEX IF NOT EXISTS idx_llm_workflow ON llm_interactions(workflow_type);
+"""
+# ========================================================================
+# Table: IO_SAMPLES 
+# ========================================================================
+CREATE_IO_SAMPLES = """
+CREATE TABLE IF NOT EXISTS io_samples (
+    sample_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id           INTEGER NOT NULL,
+    sample_start_ns  INTEGER NOT NULL,
+    sample_end_ns    INTEGER NOT NULL,
+    interval_ns      INTEGER NOT NULL,
+    device           TEXT,
+    disk_read_bytes  BIGINT,
+    disk_write_bytes BIGINT,
+    io_block_time_ms REAL,
+    disk_latency_ms  REAL,
+    minor_page_faults INTEGER,
+    major_page_faults INTEGER,
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+"""
+CREATE_ENERGY_ATTRIBUTION = """
+CREATE TABLE IF NOT EXISTS energy_attribution (
+    run_id                          INTEGER PRIMARY KEY,
+    pkg_energy_uj                   BIGINT,
+    core_energy_uj                  BIGINT,
+    dram_energy_uj                  BIGINT,
+    uncore_energy_uj                BIGINT,
+    background_energy_uj            BIGINT,
+    interrupt_energy_uj             BIGINT,
+    scheduler_energy_uj             BIGINT,
+    network_wait_energy_uj          BIGINT,
+    io_wait_energy_uj               BIGINT,
+    disk_energy_uj                  BIGINT,
+    memory_pressure_energy_uj       BIGINT,
+    cache_dram_energy_uj            BIGINT,
+    orchestration_energy_uj         BIGINT,
+    planning_energy_uj              BIGINT,
+    execution_energy_uj             BIGINT,
+    synthesis_energy_uj             BIGINT,
+    inter_phase_energy_uj           BIGINT,
+    tool_energy_uj                  BIGINT,
+    retry_energy_uj                 BIGINT,
+    failed_tool_energy_uj           BIGINT,
+    rejected_generation_energy_uj   BIGINT,
+    llm_compute_energy_uj           BIGINT,
+    prefill_energy_uj               BIGINT,
+    decode_energy_uj                BIGINT,
+    energy_per_completion_token_uj  REAL,
+    energy_per_successful_step_uj   REAL,
+    energy_per_accepted_answer_uj   REAL,
+    energy_per_solved_task_uj       REAL,
+    thermal_penalty_energy_uj       BIGINT,
+    thermal_penalty_time_ms         REAL,
+    unattributed_energy_uj          BIGINT,
+    attribution_coverage_pct        REAL,
+    attribution_model_version       TEXT DEFAULT 'v1',
+    llm_wait_energy_uj              BIGINT DEFAULT 0,
+    attribution_method              TEXT DEFAULT 'cpu_fraction_v1',
+    ml_model_version                TEXT DEFAULT NULL,
+    ttft_ms                         REAL DEFAULT NULL,
+    tpot_ms                         REAL DEFAULT NULL,    
+    created_at                      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at                      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+     -- GPU AXIS 2A: functional projection (ETL populated by 15-C)
+     -- D7 invariant: gpu_dynamic = gpu_llm_compute + gpu_orchestration (exact)
+    gpu_llm_compute_energy_uj     BIGINT,
+    gpu_orchestration_energy_uj   BIGINT,
+     -- GPU AXIS 2B: phase projection (ETL populated by 15-C)
+     -- D8 invariant: gpu_dynamic = sum of phase columns (exact)
+    gpu_phase_planning_uj         BIGINT,
+    gpu_phase_execution_uj        BIGINT,
+    gpu_phase_synthesis_uj        BIGINT,
+    gpu_phase_inter_uj            BIGINT,
+    -- Attribution model metadata (39.4b): recorded on every row.
+    -- isolation_level: exclusive | partitioned | shared (D10.5).
+    -- idle_policy: named convention for idle energy allocation (D10.3).
+    isolation_level               TEXT DEFAULT 'exclusive',
+    idle_policy                   TEXT DEFAULT 'legacy_baseline_subtraction',
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_energy_attribution_run
+    ON energy_attribution(run_id);
+"""
+
+# =============================================================================
+# Chunk 16D: Thermal V2 + Cooling + CPU Idle States (v65-v70)
+# =============================================================================
+
+CREATE_THERMAL_ZONES = """
+CREATE TABLE IF NOT EXISTS thermal_zones (
+    zone_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    machine_id          TEXT    NOT NULL,
+    zone_type           TEXT    NOT NULL,
+    zone_index          INTEGER NOT NULL,
+    driver              TEXT,
+    device              TEXT,
+    canonical_role      TEXT    NOT NULL,
+    source_subsystem    TEXT    NOT NULL DEFAULT 'thermal_zone',
+    first_seen          TEXT    NOT NULL,
+    last_seen           TEXT    NOT NULL,
+    active              INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(machine_id, zone_type, zone_index)
+);
+CREATE INDEX IF NOT EXISTS idx_thermal_zones_machine_role
+    ON thermal_zones(machine_id, canonical_role);
+CREATE INDEX IF NOT EXISTS idx_thermal_zones_active
+    ON thermal_zones(machine_id, active);
+"""
+
+CREATE_COOLING_DEVICES = """
+CREATE TABLE IF NOT EXISTS cooling_devices (
+    device_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    machine_id          TEXT    NOT NULL,
+    device_type         TEXT    NOT NULL,
+    device_index        INTEGER NOT NULL,
+    driver              TEXT,
+    device              TEXT,
+    canonical_role      TEXT    NOT NULL,
+    source_subsystem    TEXT    NOT NULL DEFAULT 'thermal_zone',
+    max_state           INTEGER NOT NULL DEFAULT 0,
+    first_seen          TEXT    NOT NULL,
+    last_seen           TEXT    NOT NULL,
+    active              INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(machine_id, device_type, device_index)
+);
+CREATE INDEX IF NOT EXISTS idx_cooling_devices_machine_role
+    ON cooling_devices(machine_id, canonical_role);
+CREATE INDEX IF NOT EXISTS idx_cooling_devices_active
+    ON cooling_devices(machine_id, active);
+"""
+
+CREATE_THERMAL_SAMPLES_V2 = """
+CREATE TABLE IF NOT EXISTS thermal_samples_v2 (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL,
+    zone_id         INTEGER NOT NULL,
+    timestamp_ns    INTEGER NOT NULL,
+    temp_celsius    REAL    NOT NULL,
+    quality_flag    TEXT    NOT NULL DEFAULT 'VALID',
+    invalid_reason  TEXT,
+    global_run_id   TEXT,
+    FOREIGN KEY(run_id)  REFERENCES runs(run_id),
+    FOREIGN KEY(zone_id) REFERENCES thermal_zones(zone_id)
+);
+CREATE INDEX IF NOT EXISTS idx_thermal_v2_run_time
+    ON thermal_samples_v2(run_id, timestamp_ns);
+CREATE INDEX IF NOT EXISTS idx_thermal_v2_zone_time
+    ON thermal_samples_v2(zone_id, timestamp_ns);
+CREATE INDEX IF NOT EXISTS idx_thermal_v2_quality
+    ON thermal_samples_v2(run_id, quality_flag);
+"""
+
+CREATE_COOLING_SAMPLES = """
+CREATE TABLE IF NOT EXISTS cooling_samples (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL,
+    device_id       INTEGER NOT NULL,
+    timestamp_ns    INTEGER NOT NULL,
+    cur_state       INTEGER NOT NULL,
+    quality_flag    TEXT    NOT NULL DEFAULT 'VALID',
+    invalid_reason  TEXT,
+    global_run_id   TEXT,
+    FOREIGN KEY(run_id)    REFERENCES runs(run_id),
+    FOREIGN KEY(device_id) REFERENCES cooling_devices(device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cooling_samples_run_time
+    ON cooling_samples(run_id, timestamp_ns);
+CREATE INDEX IF NOT EXISTS idx_cooling_samples_device_time
+    ON cooling_samples(device_id, timestamp_ns);
+CREATE INDEX IF NOT EXISTS idx_cooling_samples_throttle
+    ON cooling_samples(run_id, quality_flag, cur_state);
+"""
+
+CREATE_CPU_IDLE_STATES = """
+CREATE TABLE IF NOT EXISTS cpu_idle_states (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id              INTEGER NOT NULL REFERENCES runs(run_id),
+    platform            TEXT NOT NULL,
+    state_name          TEXT NOT NULL,
+    depth_rank          INTEGER NOT NULL,
+    residency_seconds   REAL NOT NULL,
+    residency_type      TEXT NOT NULL CHECK(residency_type IN (
+                            'delta', 'cumulative', 'percentage')),
+    measurement_source  TEXT NOT NULL,
+    UNIQUE(run_id, measurement_source, state_name)
+);
+CREATE INDEX IF NOT EXISTS idx_cpu_idle_states_run_id
+    ON cpu_idle_states(run_id);
+CREATE INDEX IF NOT EXISTS idx_cpu_idle_states_platform_depth
+    ON cpu_idle_states(platform, depth_rank);
+"""
+
+CREATE_V_THERMAL_CPU = """
+CREATE VIEW IF NOT EXISTS v_thermal_cpu AS
+SELECT
+    ts.run_id,
+    ts.timestamp_ns,
+    ts.temp_celsius     AS cpu_temp,
+    tz.machine_id,
+    tz.zone_id,
+    tz.zone_type,
+    tz.canonical_role
+FROM thermal_samples_v2 ts
+JOIN thermal_zones tz ON ts.zone_id = tz.zone_id
+WHERE tz.canonical_role IN ('CPU_PACKAGE', 'SOC')
+  AND ts.quality_flag = 'VALID'
+  AND tz.active = 1;
+"""
+
+# =============================================================================
+# Chunk 6: Normalization Factors Table
+# =============================================================================
+ 
+CREATE_NORMALIZATION_FACTORS = """
+CREATE TABLE IF NOT EXISTS normalization_factors (
+    run_id                  INTEGER PRIMARY KEY,
+    difficulty_score        REAL,
+    difficulty_bucket       TEXT,
+    task_category           TEXT,
+    workload_type           TEXT,
+    max_step_depth          INTEGER,
+    branching_factor        REAL,
+    input_tokens            INTEGER,
+    output_tokens           INTEGER,
+    context_window_size     INTEGER,
+    total_work_units        REAL,
+    successful_goals        INTEGER,
+    attempted_goals         INTEGER,
+    failed_attempts         INTEGER,
+    retry_depth             INTEGER,
+    total_retries           INTEGER,
+    total_failures          INTEGER,
+    total_tool_calls        INTEGER,
+    failed_tool_calls       INTEGER,
+    hallucination_count     INTEGER,
+    hallucination_rate      REAL,
+    rss_memory_gb           REAL,
+    cache_miss_rate         REAL,
+    io_wait_ratio           REAL,
+    stall_time_ms           REAL,
+    sla_violations          INTEGER,
+    created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_normalization_factors_run
+    ON normalization_factors(run_id);
+CREATE INDEX IF NOT EXISTS idx_normalization_factors_difficulty
+    ON normalization_factors(difficulty_bucket, task_category);
+"""
+CREATE_RUN_QUALITY = """
+CREATE TABLE IF NOT EXISTS run_quality (
+    run_id              INTEGER PRIMARY KEY,
+    experiment_valid    INTEGER NOT NULL,
+    quality_score       REAL    NOT NULL,
+    rejection_reason    TEXT,
+    quality_version     INTEGER NOT NULL,
+    computed_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    gpu_valid            INTEGER DEFAULT 1,   -- 0 if GPU measurement invalid
+    gpu_rejection_reason TEXT,                 -- reason if gpu_valid=0
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_run_quality_run_id ON run_quality(run_id);
+CREATE INDEX IF NOT EXISTS idx_run_quality_valid  ON run_quality(experiment_valid);
+""" 
+CREATE_OUTLIER_DETECTION_CONFIG = """
+CREATE TABLE IF NOT EXISTS outlier_detection_config (
+    config_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    config_version      INTEGER NOT NULL,
+    method              TEXT NOT NULL,
+    metric_name         TEXT NOT NULL,
+    parameter_name      TEXT NOT NULL,
+    parameter_value     REAL NOT NULL,
+    description         TEXT,
+    effective_from      TIMESTAMP NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')),
+    effective_to        TIMESTAMP,
+    created_at                       TIMESTAMP NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')),
+    outlier_class                      TEXT DEFAULT 'data_quality_failure',
+
+    UNIQUE(config_version, method, metric_name, parameter_name)
+);
+CREATE INDEX IF NOT EXISTS idx_odc_active
+    ON outlier_detection_config(method, metric_name)
+    WHERE effective_to IS NULL;
+"""
+
+CREATE_EXTENSION_REGISTRY = """
+CREATE TABLE IF NOT EXISTS extension_registry (
+    name              TEXT PRIMARY KEY,
+    version           TEXT NOT NULL,
+    activated_at      TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'active',
+    migration_version TEXT
+);
+"""
+
+CREATE_RUN_OUTLIERS = """
+CREATE TABLE IF NOT EXISTS run_outliers (
+    outlier_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id                INTEGER NOT NULL,
+    metric_name           TEXT NOT NULL,
+    detection_method      TEXT NOT NULL,
+    detection_version     INTEGER NOT NULL,
+    population_key        TEXT NOT NULL,
+    population_size       INTEGER NOT NULL,
+    raw_value             REAL NOT NULL,
+    population_median     REAL,
+    population_mad        REAL,
+    z_score               REAL,
+    iqr_lower_fence       REAL,
+    iqr_upper_fence       REAL,
+    threshold_violated    REAL NOT NULL,
+    direction             TEXT,
+    severity              TEXT NOT NULL DEFAULT 'informational',
+    detection_status      TEXT NOT NULL DEFAULT 'flagged',
+    review_status         TEXT NOT NULL DEFAULT 'pending',
+    reviewed_by           TEXT,
+    reviewed_at           TIMESTAMP,
+    review_note           TEXT,
+    outlier_class         TEXT DEFAULT 'data_quality_failure',
+    detected_at           TIMESTAMP NOT NULL
+        DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')),
+    FOREIGN KEY (run_id) REFERENCES runs(run_id),
+    UNIQUE(run_id, metric_name, detection_method)
+);
+CREATE INDEX IF NOT EXISTS idx_ro_run         ON run_outliers(run_id);
+CREATE INDEX IF NOT EXISTS idx_ro_review      ON run_outliers(review_status);
+CREATE INDEX IF NOT EXISTS idx_ro_severity    ON run_outliers(severity);
+CREATE INDEX IF NOT EXISTS idx_ro_population  ON run_outliers(population_key);
+CREATE INDEX IF NOT EXISTS idx_ro_confirmed   ON run_outliers(run_id)
+    WHERE review_status = 'confirmed';
+"""
+ 
+CREATE_V_RUNS_CLEAN = """
+CREATE VIEW IF NOT EXISTS v_runs_clean AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT run_id FROM run_outliers WHERE review_status = 'confirmed'
+    );
+
+-- G137: runs with their goal meaning, no goal columns in runs (C2).
+CREATE VIEW IF NOT EXISTS v_runs_goal AS
+SELECT r.*, ga.goal_id, ga.attempt_id, ga.attempt_number, ga.outcome, ga.is_winning
+FROM runs r
+LEFT JOIN goal_attempt ga ON ga.run_id = r.run_id;
+"""
+ 
+CREATE_V_RUNS_UNFILTERED = """
+CREATE VIEW IF NOT EXISTS v_runs_unfiltered AS
+SELECT r.*,
+    e.is_valid AS exp_is_valid,
+    rq.experiment_valid AS quality_valid,
+    rq.quality_score,
+    CASE WHEN ro.run_id IS NOT NULL THEN 1 ELSE 0 END AS has_outlier_flags,
+    ro.max_severity
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+LEFT JOIN (
+    SELECT run_id,
+        CASE MAX(CASE severity WHEN 'extreme' THEN 3 WHEN 'suspect' THEN 2 ELSE 1 END)
+            WHEN 3 THEN 'extreme' WHEN 2 THEN 'suspect' ELSE 'informational'
+        END AS max_severity
+    FROM run_outliers GROUP BY run_id
+) ro ON r.run_id = ro.run_id;
+"""
+# =============================================================================
+# Outlier Detection v2 (schema v80): analysis domains, metric mappings,
+# view config, and the 12 purpose-scoped views (6 domains x 2 tiers).
+# Rule SC-1/SC-2: these constants must match the live DB exactly.
+# ALTER TABLE additions (outlier_class on run_outliers and
+# outlier_detection_config) are reflected by updating the CREATE TABLE
+# constants above to include outlier_class in the column list.
+# =============================================================================
+
+CREATE_ANALYSIS_DOMAIN_CONFIG = """
+CREATE TABLE IF NOT EXISTS analysis_domain_config (
+    domain_name         TEXT PRIMARY KEY,
+    is_foundation        INTEGER NOT NULL DEFAULT 0,
+    description            TEXT NOT NULL,
+    column_count             INTEGER NOT NULL,
+    created_at                  TIMESTAMP NOT NULL
+        DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+"""
+
+CREATE_METRIC_ANALYSIS_DOMAINS = """
+CREATE TABLE IF NOT EXISTS metric_analysis_domains (
+    metric_name          TEXT NOT NULL,
+    domain_name            TEXT NOT NULL,
+    rationale                 TEXT,
+    PRIMARY KEY (metric_name, domain_name),
+    FOREIGN KEY (domain_name) REFERENCES analysis_domain_config(domain_name)
+);
+CREATE INDEX IF NOT EXISTS idx_mad_domain ON metric_analysis_domains(domain_name);
+"""
+
+CREATE_ANALYSIS_VIEW_CONFIG = """
+CREATE TABLE IF NOT EXISTS analysis_view_config (
+    view_name             TEXT NOT NULL,
+    domain_name             TEXT NOT NULL,
+    include_foundation         INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (view_name, domain_name),
+    FOREIGN KEY (domain_name) REFERENCES analysis_domain_config(domain_name)
+);
+"""
+# NOTE: The 12 purpose-scoped views (v_runs_clean_<domain>,
+# v_runs_measured_<domain>) are generated dynamically by
+# scripts/migrations/v80_outlier_v2_views.py from the seeded
+# analysis_view_config and analysis_domain_config tables.
+# They are not represented as static constants here because their
+# SQL depends on runtime config (domain membership, foundation
+# propagation flags). Re-run v80_outlier_v2_views.py on any fresh
+# database after seeding to regenerate them. (SC-1 exception,
+# documented here per Rule SC-2.)
+# =============================================================================
+# Chunk 6: Normalisation Views
+# =============================================================================
+
+CREATE_V_RUNS_CLEAN_ENERGY = """
+CREATE VIEW IF NOT EXISTS v_runs_clean_energy AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'energy'
+              )
+              
+                  OR mad.domain_name IN (
+                      SELECT domain_name FROM analysis_domain_config
+                      WHERE is_foundation = 1
+                  )
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_MEASURED_ENERGY = """
+CREATE VIEW IF NOT EXISTS v_runs_measured_energy AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          AND ro.outlier_class = 'data_quality_failure'
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'energy'
+              )
+              
+                  OR mad.domain_name IN (
+                      SELECT domain_name FROM analysis_domain_config
+                      WHERE is_foundation = 1
+                  )
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_CLEAN_CPU = """
+CREATE VIEW IF NOT EXISTS v_runs_clean_cpu AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'cpu'
+              )
+              
+                  OR mad.domain_name IN (
+                      SELECT domain_name FROM analysis_domain_config
+                      WHERE is_foundation = 1
+                  )
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_MEASURED_CPU = """
+CREATE VIEW IF NOT EXISTS v_runs_measured_cpu AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          AND ro.outlier_class = 'data_quality_failure'
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'cpu'
+              )
+              
+                  OR mad.domain_name IN (
+                      SELECT domain_name FROM analysis_domain_config
+                      WHERE is_foundation = 1
+                  )
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_CLEAN_THERMAL = """
+CREATE VIEW IF NOT EXISTS v_runs_clean_thermal AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'thermal'
+              )
+              
+                  OR mad.domain_name IN (
+                      SELECT domain_name FROM analysis_domain_config
+                      WHERE is_foundation = 1
+                  )
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_MEASURED_THERMAL = """
+CREATE VIEW IF NOT EXISTS v_runs_measured_thermal AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          AND ro.outlier_class = 'data_quality_failure'
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'thermal'
+              )
+              
+                  OR mad.domain_name IN (
+                      SELECT domain_name FROM analysis_domain_config
+                      WHERE is_foundation = 1
+                  )
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_CLEAN_LLM = """
+CREATE VIEW IF NOT EXISTS v_runs_clean_llm AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'llm'
+              )
+              
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_MEASURED_LLM = """
+CREATE VIEW IF NOT EXISTS v_runs_measured_llm AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          AND ro.outlier_class = 'data_quality_failure'
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'llm'
+              )
+              
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_CLEAN_ORCHESTRATION = """
+CREATE VIEW IF NOT EXISTS v_runs_clean_orchestration AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'orchestration'
+              )
+              
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_MEASURED_ORCHESTRATION = """
+CREATE VIEW IF NOT EXISTS v_runs_measured_orchestration AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          AND ro.outlier_class = 'data_quality_failure'
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'orchestration'
+              )
+              
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_CLEAN_SYSTEM = """
+CREATE VIEW IF NOT EXISTS v_runs_clean_system AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'system'
+              )
+              
+                  OR mad.domain_name IN (
+                      SELECT domain_name FROM analysis_domain_config
+                      WHERE is_foundation = 1
+                  )
+          )
+    )
+
+;
+"""
+
+CREATE_V_RUNS_MEASURED_SYSTEM = """
+CREATE VIEW IF NOT EXISTS v_runs_measured_system AS
+SELECT r.*
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN run_quality rq ON r.run_id = rq.run_id
+WHERE
+    e.is_valid = 1
+    AND COALESCE(rq.experiment_valid, 1) = 1
+    AND r.run_id NOT IN (
+        SELECT DISTINCT ro.run_id
+        FROM run_outliers ro
+        JOIN metric_analysis_domains mad
+            ON ro.metric_name = mad.metric_name
+        WHERE ro.review_status = 'confirmed'
+          AND ro.outlier_class = 'data_quality_failure'
+          AND (
+              mad.domain_name IN (
+                  SELECT avc.domain_name FROM analysis_view_config avc
+                  WHERE avc.view_name = 'system'
+              )
+              
+                  OR mad.domain_name IN (
+                      SELECT domain_name FROM analysis_domain_config
+                      WHERE is_foundation = 1
+                  )
+          )
+    )
+
+;
+""" 
+
+CREATE_ENERGY_NORMALIZED_VIEW = """
+CREATE VIEW IF NOT EXISTS v_energy_normalized AS
+SELECT
+    a.run_id,
+    r.workflow_type,
+    r.complexity_level,
+    a.pkg_energy_uj  / 1e6 AS total_energy_j,
+    a.core_energy_uj / 1e6 AS compute_energy_j,
+    a.dram_energy_uj / 1e6 AS memory_energy_j,
+    (a.pkg_energy_uj - COALESCE(a.background_energy_uj, 0)) / 1e6 AS foreground_energy_j,
+    a.pkg_energy_uj / NULLIF(l.total_tokens, 0) AS energy_per_token_uj,
+    a.pkg_energy_uj / 1e6 / NULLIF(CAST(r.duration_ns AS REAL) / 1e9, 0) AS avg_power_watts,
+    a.orchestration_energy_uj / NULLIF(CAST(a.pkg_energy_uj AS REAL), 0) AS orchestration_ratio,
+    a.llm_compute_energy_uj / NULLIF(CAST(a.orchestration_energy_uj AS REAL), 0) AS compute_vs_overhead_ratio,
+    a.unattributed_energy_uj / NULLIF(CAST(a.pkg_energy_uj AS REAL), 0) AS unattributed_ratio,
+    a.attribution_coverage_pct,
+    a.energy_per_completion_token_uj,
+    a.energy_per_successful_step_uj,
+    a.energy_per_accepted_answer_uj,
+    a.energy_per_solved_task_uj,
+    a.thermal_penalty_energy_uj / 1e6 AS thermal_penalty_j,
+    a.thermal_penalty_time_ms,
+    r.duration_ns / 1e6 AS duration_ms,
+    l.total_tokens,
+    l.completion_tokens
+FROM energy_attribution a
+JOIN runs r ON a.run_id = r.run_id
+LEFT JOIN (
+    SELECT run_id, SUM(total_tokens) AS total_tokens,
+           SUM(completion_tokens) AS completion_tokens
+    FROM llm_interactions GROUP BY run_id
+) l ON a.run_id = l.run_id;
+"""
+
+CREATE_ATTRIBUTION_SUMMARY_VIEW = """
+CREATE VIEW IF NOT EXISTS v_attribution_summary AS
+SELECT
+    a.run_id,
+    r.workflow_type,
+    -- Absolute Joules
+    a.pkg_energy_uj           / 1e6  AS pkg_j,
+    r.baseline_energy_uj      / 1e6  AS baseline_j,
+    r.dynamic_energy_uj       / 1e6  AS dynamic_j,
+    a.background_energy_uj    / 1e6  AS background_j,
+    r.attributed_energy_uj    / 1e6  AS attributed_j,
+    a.orchestration_energy_uj / 1e6  AS orchestration_j,
+    a.llm_wait_energy_uj      / 1e6  AS llm_wait_j,
+    a.llm_compute_energy_uj   / 1e6  AS llm_compute_j,
+    a.planning_energy_uj      / 1e6  AS planning_j,
+    a.execution_energy_uj     / 1e6  AS execution_j,
+    a.synthesis_energy_uj     / 1e6  AS synthesis_j,
+    a.inter_phase_energy_uj   / 1e6  AS inter_phase_j,
+    a.thermal_penalty_energy_uj / 1e6 AS thermal_j,
+    a.unattributed_energy_uj  / 1e6  AS unattributed_j,
+    -- L1: pkg decomposition (denominator = pkg)
+    ROUND(r.baseline_energy_uj     * 100.0 / NULLIF(a.pkg_energy_uj, 0), 2) AS baseline_pct_of_pkg,
+    ROUND(r.dynamic_energy_uj      * 100.0 / NULLIF(a.pkg_energy_uj, 0), 2) AS dynamic_pct_of_pkg,
+    ROUND(a.unattributed_energy_uj * 100.0 / NULLIF(a.pkg_energy_uj, 0), 2) AS unattributed_pct_of_pkg,
+    -- L2: dynamic decomposition (denominator = dynamic)
+    ROUND(a.background_energy_uj   * 100.0 / NULLIF(r.dynamic_energy_uj, 0), 2) AS background_pct_of_dynamic,
+    ROUND(r.attributed_energy_uj   * 100.0 / NULLIF(r.dynamic_energy_uj, 0), 2) AS attributed_pct_of_dynamic,
+    -- L3: attributed decomposition (denominator = attributed) — broad metrics
+    ROUND(a.orchestration_energy_uj * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS orchestration_pct,
+    ROUND(a.llm_wait_energy_uj      * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS llm_wait_pct,
+    ROUND(a.llm_compute_energy_uj   * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS llm_compute_pct,
+    ROUND(a.inter_phase_energy_uj   * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS inter_phase_pct,
+    -- D1: conservation-bounded functional partition (sums to 100% of attributed)
+    ROUND(a.llm_compute_energy_uj   * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS d1_llm_pct,
+    ROUND(a.orchestration_energy_uj * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS d1_orch_pct,
+    -- D2: conservation-bounded phase partition (sums to ~100% of attributed)
+    ROUND(a.planning_energy_uj      * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS d2_plan_pct,
+    ROUND(a.execution_energy_uj     * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS d2_exec_pct,
+    ROUND(a.synthesis_energy_uj     * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS d2_syn_pct,
+    ROUND(a.inter_phase_energy_uj   * 100.0 / NULLIF(r.attributed_energy_uj, 0), 2) AS d2_inter_pct,
+    -- Coverage
+    a.attribution_coverage_pct,
+    r.phase_sample_coverage_pct,
+    a.attribution_method,
+    a.attribution_model_version
+FROM energy_attribution a
+JOIN runs r ON a.run_id = r.run_id;
+"""
+
+
+# ========================================================================
+# View : ml_view - analytical view that flattens runs and llm_interactions for ML modeling
+# ========================================================================
+CREATE_RESEARCH_METRICS_VIEW = """
+CREATE VIEW IF NOT EXISTS research_metrics_view AS
+SELECT 
+    r.run_id,
+    r.exp_id,
+    e.provider,
+    r.workflow_type,
+    r.duration_ns / 1e6 AS total_time_ms,
+    r.compute_time_ms,
+    r.orchestration_cpu_ms,
+    r.bytes_sent AS total_bytes_sent,
+    r.bytes_recv AS total_bytes_recv,
+    
+    COALESCE(i.total_wait_ms, 0) AS total_wait_ms,
+    COALESCE(i.total_llm_compute_ms, 0) AS total_llm_compute_ms,
+    
+    CASE WHEN r.duration_ns > 0 THEN r.orchestration_cpu_ms * 1.0 / (r.duration_ns / 1e6) ELSE 0 END AS ooi_time,
+    CASE WHEN r.compute_time_ms > 0 THEN r.orchestration_cpu_ms * 1.0 / r.compute_time_ms ELSE 0 END AS ooi_cpu,
+    CASE WHEN r.duration_ns > 0 THEN COALESCE(i.total_llm_compute_ms, 0) * 1.0 / (r.duration_ns / 1e6) ELSE 0 END AS ucr,
+    CASE WHEN r.duration_ns > 0 THEN COALESCE(i.total_wait_ms, 0) * 1.0 / (r.duration_ns / 1e6) ELSE 0 END AS network_ratio
+
+FROM runs r
+JOIN experiments e ON r.exp_id = e.exp_id
+LEFT JOIN (
+    SELECT 
+        run_id, 
+        SUM(non_local_ms) AS total_wait_ms,
+        SUM(local_compute_ms) AS total_llm_compute_ms
+    FROM llm_interactions
+    GROUP BY run_id
+) i ON r.run_id = i.run_id
+WHERE (i.total_llm_compute_ms > 0 OR i.total_wait_ms > 0)
+  AND (r.orchestration_cpu_ms <= r.compute_time_ms * 5);
+
+"""
+
+ENERGY_SAMPLES_WITH_POWER_VIEW = """
+CREATE VIEW IF NOT EXISTS energy_samples_with_power AS
+SELECT 
+    e1.sample_id,
+    e1.run_id,
+    e1.timestamp_ns / 1e9 AS time_s,
+    e1.pkg_energy_uj,
+    e1.core_energy_uj,
+    e1.uncore_energy_uj,
+    e1.dram_energy_uj,
+    -- Power (watts) = Δenergy (µJ) / Δtime (seconds) / 1e6
+    (e1.pkg_energy_uj - e2.pkg_energy_uj) / ((e1.timestamp_ns - e2.timestamp_ns) / 1e9) / 1e6 AS pkg_power_watts,
+    (e1.core_energy_uj - e2.core_energy_uj) / ((e1.timestamp_ns - e2.timestamp_ns) / 1e9) / 1e6 AS core_power_watts,
+    (e1.uncore_energy_uj - e2.uncore_energy_uj) / ((e1.timestamp_ns - e2.timestamp_ns) / 1e9) / 1e6 AS uncore_power_watts,
+    (e1.dram_energy_uj - e2.dram_energy_uj) / ((e1.timestamp_ns - e2.timestamp_ns) / 1e9) / 1e6 AS dram_power_watts
+FROM energy_samples e1
+LEFT JOIN energy_samples e2 ON e1.run_id = e2.run_id 
+    AND e2.timestamp_ns = (
+        SELECT MAX(timestamp_ns) 
+        FROM energy_samples e3 
+        WHERE e3.run_id = e1.run_id AND e3.timestamp_ns < e1.timestamp_ns
+    )
+WHERE e2.timestamp_ns IS NOT NULL
+ORDER BY e1.run_id, e1.timestamp_ns;
+"""
+
+# ============================================================
+# METHODOLOGY & PROVENANCE TABLES
+# ============================================================
+
+CREATE_MEASUREMENT_METHOD_REGISTRY = """
+CREATE TABLE IF NOT EXISTS measurement_method_registry (
+    id                    TEXT        PRIMARY KEY,
+    name                  TEXT        NOT NULL,
+    version               TEXT        DEFAULT '1.0',
+    description           TEXT        NOT NULL,
+    formula_latex         TEXT,
+    code_snapshot         TEXT,
+    code_language         TEXT        DEFAULT 'python',
+    code_version          TEXT,
+    parameters            TEXT,
+    output_metric         TEXT,
+    output_unit           TEXT,
+    provenance            TEXT        DEFAULT 'MEASURED',
+    layer                 TEXT,
+    applicable_on         TEXT        DEFAULT '["any"]',
+    fallback_method_id    TEXT,
+    validated             INTEGER     DEFAULT 0,
+    confidence            REAL        DEFAULT 1.0,  -- confidence score 0.0-1.0
+    validated_by          TEXT,
+    validated_date        TEXT,
+    active                INTEGER     DEFAULT 1,
+    deprecated_reason     TEXT,
+    doc                   TEXT,
+    section               TEXT,
+    method_anchor         TEXT,
+    created_at            REAL        DEFAULT (unixepoch()),
+    updated_at            REAL        DEFAULT (unixepoch())
+);
+"""
+
+CREATE_METHOD_REFERENCES = """
+CREATE TABLE IF NOT EXISTS method_references (
+    id              INTEGER     PRIMARY KEY AUTOINCREMENT,
+    method_id       TEXT        NOT NULL,
+    ref_type        TEXT        NOT NULL,
+    title           TEXT        NOT NULL,
+    authors         TEXT,
+    year            INTEGER,
+    venue           TEXT,
+    doi             TEXT,
+    url             TEXT,
+    relevance       TEXT,
+    cited_text      TEXT,
+    page_or_section TEXT,
+    created_at      TEXT        DEFAULT (datetime('now'))
+);
+"""
+
+CREATE_MEASUREMENT_METHODOLOGY = """
+CREATE TABLE IF NOT EXISTS measurement_methodology (
+    id                    INTEGER     PRIMARY KEY AUTOINCREMENT,
+    run_id                INTEGER     NOT NULL,
+    metric_id             TEXT        NOT NULL,
+    method_id             TEXT,
+    parameters_used       TEXT,
+    value_raw             REAL,
+    value_unit            TEXT,
+    provenance            TEXT        NOT NULL,
+    hw_available          INTEGER,
+    confidence            REAL,
+    primary_method_failed INTEGER     DEFAULT 0,
+    failure_reason        TEXT,
+    standard_ids          TEXT,
+    captured_at           REAL        DEFAULT (unixepoch()),
+    method_anchor         TEXT
+);
+"""
+
+CREATE_METRIC_DISPLAY_REGISTRY = """
+CREATE TABLE IF NOT EXISTS metric_display_registry (
+    id                    TEXT        PRIMARY KEY,
+    label                 TEXT        NOT NULL,
+    description           TEXT,
+    category              TEXT,
+    layer                 TEXT,
+    layer_order           INTEGER,
+    method_id             TEXT,
+    unit_default          TEXT,
+    unit_options          TEXT,
+    unit_scales           TEXT,
+    chart_type            TEXT        DEFAULT 'kpi',
+    color_token           TEXT        DEFAULT 'accent.silicon',
+    significance          TEXT        DEFAULT 'supporting',
+    direction             TEXT        DEFAULT 'lower_is_better',
+    display_precision     INTEGER     DEFAULT 2,
+    warn_threshold        REAL,
+    severe_threshold      REAL,
+    threshold_unit        TEXT,
+    visible_in            TEXT        DEFAULT '["workbench"]',
+    default_visible       INTEGER     DEFAULT 1,
+    leaderboard           INTEGER     DEFAULT 0,
+    provenance_expected   TEXT        DEFAULT 'MEASURED',
+    formula_latex         TEXT,
+    source_description    TEXT,
+    source_yaml           TEXT,
+    goal_id               TEXT,
+    active                INTEGER     DEFAULT 1,
+    sort_order            INTEGER     DEFAULT 0,
+    doc                   TEXT,
+    section               TEXT,
+    method_anchor         TEXT,
+    created_at            REAL        DEFAULT (unixepoch()),
+    updated_at            REAL        DEFAULT (unixepoch())
+);
+"""
+
+CREATE_QUERY_REGISTRY = """
+CREATE TABLE IF NOT EXISTS query_registry (
+    id                    TEXT        PRIMARY KEY,
+    name                  TEXT        NOT NULL,
+    description           TEXT,
+    metric_type           TEXT        NOT NULL,
+    sql_text              TEXT,
+    sql_file              TEXT,
+    dialect_aware         INTEGER     DEFAULT 0,
+    returns               TEXT        DEFAULT 'rows',
+    depends_on            TEXT,
+    formula               TEXT,
+    endpoint_path         TEXT,
+    group_name            TEXT        DEFAULT 'analytics',
+    parameters            TEXT        DEFAULT '{}',
+    enrich_metrics        INTEGER     DEFAULT 0,
+    cache_ttl_sec         INTEGER     DEFAULT 30,
+    active                INTEGER     DEFAULT 1,
+    source_yaml           TEXT,
+    source_tab            TEXT,
+    version               TEXT        DEFAULT '1.0',
+    created_at            TEXT        DEFAULT (datetime('now')),
+    updated_at            TEXT        DEFAULT (datetime('now'))
+);
+"""
+
+CREATE_STANDARDIZATION_REGISTRY = """
+CREATE TABLE IF NOT EXISTS standardization_registry (
+    id                    INTEGER     PRIMARY KEY AUTOINCREMENT,
+    standard_id           TEXT        NOT NULL UNIQUE,
+    category              TEXT,
+    value                 REAL        NOT NULL,
+    unit                  TEXT,
+    source                TEXT,
+    source_url            TEXT,
+    valid_from            TEXT,
+    valid_until           TEXT,
+    version               INTEGER     DEFAULT 1,
+    notes                 TEXT,
+    created_at            TEXT        DEFAULT (datetime('now'))
+);
+"""
+
+CREATE_EVAL_CRITERIA = """
+CREATE TABLE IF NOT EXISTS eval_criteria (
+    id                    INTEGER     PRIMARY KEY AUTOINCREMENT,
+    goal_id               TEXT        NOT NULL UNIQUE,
+    stat_test             TEXT,
+    alpha                 REAL        DEFAULT 0.05,
+    effect_size           TEXT,
+    min_runs_per_group    INTEGER     DEFAULT 5,
+    report_ci             INTEGER     DEFAULT 1,
+    ci_level              REAL        DEFAULT 0.95,
+    comparison_mode       TEXT        DEFAULT 'relative',
+    created_at            TEXT        DEFAULT (datetime('now'))
+);
+"""
+
+CREATE_COMPONENT_REGISTRY = """
+CREATE TABLE IF NOT EXISTS component_registry (
+    name                  TEXT        PRIMARY KEY,
+    group_name            TEXT,
+    description           TEXT,
+    props_schema          TEXT,
+    data_shape            TEXT        DEFAULT 'flat_row',
+    has_3d_twin           TEXT,
+    export_pdf            INTEGER     DEFAULT 0,
+    export_png            INTEGER     DEFAULT 0,
+    export_csv            INTEGER     DEFAULT 0,
+    available_in          TEXT        DEFAULT '["workbench"]',
+    active                INTEGER     DEFAULT 1
+);
+"""
+
+CREATE_PAGE_CONFIGS = """
+CREATE TABLE IF NOT EXISTS page_configs (
+    id                    TEXT        PRIMARY KEY,
+    title                 TEXT        NOT NULL,
+    slug                  TEXT,
+    icon                  TEXT,
+    description           TEXT,
+    audience              TEXT        DEFAULT '["workbench"]',
+    published             INTEGER     DEFAULT 0,
+    sort_order            INTEGER     DEFAULT 0,
+    created_at            TEXT        DEFAULT (datetime('now')),
+    updated_at            TEXT        DEFAULT (datetime('now'))
+);
+"""
+
+CREATE_PAGE_SECTIONS = """
+CREATE TABLE IF NOT EXISTS page_sections (
+    id                    INTEGER     PRIMARY KEY AUTOINCREMENT,
+    page_id               TEXT        NOT NULL,
+    position              INTEGER     NOT NULL,
+    component             TEXT        NOT NULL,
+    title                 TEXT,
+    cols                  INTEGER     DEFAULT 1,
+    query_id              TEXT,
+    props                 TEXT        DEFAULT '{}',
+    visible_in            TEXT        DEFAULT '["workbench"]',
+    active                INTEGER     DEFAULT 1
+);
+"""
+
+CREATE_PAGE_METRIC_CONFIGS = """
+CREATE TABLE IF NOT EXISTS page_metric_configs (
+    id                    INTEGER     PRIMARY KEY AUTOINCREMENT,
+    section_id            INTEGER     NOT NULL,
+    metric_id             TEXT        NOT NULL,
+    position              INTEGER     NOT NULL,
+    label_override        TEXT,
+    color_override        TEXT,
+    unit_override         TEXT,
+    thesis                INTEGER     DEFAULT 0,
+    decimals              INTEGER     DEFAULT 2,
+    active                INTEGER     DEFAULT 1
+);
+"""
+
+CREATE_AUDIT_LOG = """
+CREATE TABLE IF NOT EXISTS audit_log (
+    id                    INTEGER     PRIMARY KEY AUTOINCREMENT,
+    run_id                INTEGER,
+    event_type            TEXT,
+    event_detail          TEXT,
+    metric_id             TEXT,
+    value_before          TEXT,
+    value_after           TEXT,
+    hw_context            TEXT,
+    logged_at             TEXT        DEFAULT (datetime('now'))
+);
+"""
+
+
+CREATE_PAGE_TEMPLATES = """
+CREATE TABLE IF NOT EXISTS page_templates (
+    id                    TEXT        PRIMARY KEY,
+    name                  TEXT        NOT NULL,
+    description           TEXT,
+    config                TEXT,
+    created_at            TEXT        DEFAULT (datetime('now')),
+    updated_at            TEXT        DEFAULT (datetime('now'))
+);
+"""
+
+CREATE_VIEW_GOAL_ENERGY_DECOMPOSITION = """
+-- Per-goal energy breakdown by workflow type. Primary paper view.
+-- ge.total_energy_uj is authoritative (ETL-populated, includes all retries).
+-- orchestration_fraction from winning run only — it is a rate, not a sum.
+-- had_retry flag enables stratified retry vs non-retry analysis.
+-- Views never recompute energy — reads ETL-populated columns only.
+CREATE VIEW IF NOT EXISTS v_goal_energy_decomposition AS
+SELECT
+    ge.goal_id,
+    ge.exp_id,
+    ge.workflow_type,
+    ge.goal_type,
+    ge.difficulty_level,
+    ge.total_attempts,
+    ge.success,
+    ge.total_energy_uj          / 1e6  AS total_energy_j,
+    ge.successful_energy_uj     / 1e6  AS successful_energy_j,
+    ge.overhead_energy_uj       / 1e6  AS overhead_energy_j,
+    ge.overhead_fraction,
+    ge.orchestration_fraction,
+    ea.llm_compute_energy_uj    / 1e6  AS compute_energy_j,
+    ea.orchestration_energy_uj  / 1e6  AS orchestration_energy_j,
+    ROUND(ea.llm_compute_energy_uj * 100.0
+          / NULLIF(ea.pkg_energy_uj, 0), 2)        AS compute_pct,
+    ROUND(ea.orchestration_energy_uj * 100.0
+          / NULLIF(ea.pkg_energy_uj, 0), 2)        AS orchestration_pct,
+    CASE WHEN ge.total_attempts > 1 THEN 1 ELSE 0
+    END                                            AS had_retry,
+    e.experiment_type,
+    e.experiment_goal
+FROM goal_execution ge
+JOIN experiments e
+    ON ge.exp_id = e.exp_id
+LEFT JOIN energy_attribution ea
+    ON ge.winning_run_id = ea.run_id
+WHERE e.experiment_type IN (
+    'normal','overhead_study','retry_study',
+    'failure_injection','quality_sweep','ablation','pilot'
+);
+"""
+CREATE_VIEW_FRACTION_VERIFICATION = """
+CREATE VIEW IF NOT EXISTS v_fraction_verification AS
+SELECT
+    ge.goal_id,
+    ge.winning_run_id,
+    ea.orchestration_energy_uj              AS numerator_uj,
+    r.attributed_energy_uj                  AS denominator_uj,
+    'E_orch / E_attributed'                 AS formula,
+    CASE WHEN r.attributed_energy_uj > 0
+        THEN ROUND(1.0 * ea.orchestration_energy_uj / r.attributed_energy_uj, 6)
+        ELSE NULL
+    END                                     AS recomputed_fraction,
+    ge.orchestration_fraction               AS stored_fraction,
+    CASE WHEN r.attributed_energy_uj > 0
+        THEN ROUND(ABS(ge.orchestration_fraction -
+            1.0 * ea.orchestration_energy_uj / r.attributed_energy_uj), 8)
+        ELSE NULL
+    END                                     AS delta
+FROM goal_execution ge
+LEFT JOIN runs r ON r.run_id = ge.winning_run_id
+LEFT JOIN energy_attribution ea ON ea.run_id = ge.winning_run_id
+WHERE ge.orchestration_fraction IS NOT NULL;
+"""
+
+CREATE_VIEW_OUTCOME_EFFICIENCY = """
+CREATE VIEW IF NOT EXISTS v_outcome_efficiency AS
+SELECT
+    a.run_id,
+    r.workflow_type,
+    r.complexity_level,
+    a.energy_per_completion_token_uj,
+    a.energy_per_successful_step_uj,
+    a.energy_per_accepted_answer_uj,
+    a.energy_per_solved_task_uj,
+    nf.difficulty_score,
+    nf.difficulty_bucket,
+    nf.successful_goals,
+    nf.attempted_goals,
+    nf.total_retries,
+    CASE
+        WHEN nf.attempted_goals > 0 AND nf.successful_goals > 0
+        THEN CAST(nf.attempted_goals AS REAL) / nf.successful_goals
+        ELSE NULL
+    END AS attempt_efficiency_ratio
+FROM energy_attribution a
+JOIN runs r ON a.run_id = r.run_id
+LEFT JOIN normalization_factors nf ON a.run_id = nf.run_id;
+"""
+CREATE_VIEW_FAILURE_ENERGY_TAXONOMY = """
+-- Energy wasted per failure type across hallucination and tool failure events.
+-- failure_domain separates reasoning failures from execution failures —
+-- required for cross-category paper comparisons (different ontologies).
+-- corrected_by_retry derived inline from goal_attempt — not stored.
+-- wasted_energy_uj_real (REAL) used for hallucination precision.
+CREATE VIEW IF NOT EXISTS v_failure_energy_taxonomy AS
+SELECT
+    'reasoning'                 AS failure_domain,
+    'hallucination'             AS failure_category,
+    he.hallucination_type       AS failure_subtype,
+    COUNT(*)                    AS event_count,
+    SUM(he.wasted_energy_uj_real) / 1e6  AS total_wasted_j,
+    AVG(he.wasted_energy_uj_real) / 1e6  AS avg_wasted_j,
+    ge.workflow_type,
+    EXISTS (
+        SELECT 1 FROM goal_attempt ga2
+        WHERE ga2.goal_id = he.goal_id
+          AND ga2.attempt_number > ga.attempt_number
+          AND ga2.outcome = 'success'
+    )                           AS corrected_by_retry
+FROM hallucination_events he
+JOIN goal_attempt ga   ON he.attempt_id = ga.attempt_id
+JOIN goal_execution ge ON he.goal_id = ge.goal_id
+GROUP BY he.hallucination_type, ge.workflow_type
+ 
+UNION ALL
+ 
+SELECT
+    'execution'                 AS failure_domain,
+    'tool_failure'              AS failure_category,
+    tfe.failure_type            AS failure_subtype,
+    COUNT(*)                    AS event_count,
+    SUM(tfe.wasted_energy_uj) / 1e6  AS total_wasted_j,
+    AVG(tfe.wasted_energy_uj) / 1e6  AS avg_wasted_j,
+    ge.workflow_type,
+    0                           AS corrected_by_retry
+FROM tool_failure_events tfe
+JOIN goal_attempt ga   ON tfe.attempt_id = ga.attempt_id
+JOIN goal_execution ge ON tfe.goal_id = ge.goal_id
+GROUP BY tfe.failure_type, ge.workflow_type;
+"""
+ 
+CREATE_VIEW_QUALITY_ENERGY_FRONTIER = """
+-- Quality vs total goal energy. Supports paper quality-energy tradeoff figure.
+-- Uses ge.total_energy_uj (all retries included) NOT ga.energy_uj (single attempt).
+-- energy_per_quality_point_uj = total goal cost / normalized score.
+-- Excludes needs_review scores and non-research experiment types.
+CREATE VIEW IF NOT EXISTS v_quality_energy_frontier AS
+SELECT
+    oq.attempt_id,
+    oq.goal_id,
+    oq.normalized_score,
+    oq.metric_type,
+    oq.judge_method,
+    oq.score_method,
+    oq.judge_count,
+    ge.total_energy_uj      / 1e6  AS total_goal_energy_j,
+    ga.energy_uj            / 1e6  AS attempt_energy_j,
+    ga.orchestration_uj     / 1e6  AS attempt_orchestration_j,
+    ga.compute_uj           / 1e6  AS attempt_compute_j,
+    ga.outcome,
+    ge.workflow_type,
+    ge.goal_type,
+    ge.difficulty_level,
+    CASE WHEN oq.normalized_score > 0
+         THEN ge.total_energy_uj / oq.normalized_score
+         ELSE NULL
+    END                            AS energy_per_quality_point_uj,
+    e.experiment_type
+FROM output_quality oq
+JOIN goal_attempt ga   ON oq.attempt_id = ga.attempt_id
+JOIN goal_execution ge ON oq.goal_id = ge.goal_id
+JOIN experiments e     ON ge.exp_id = e.exp_id
+WHERE oq.score_method != 'needs_review'
+  AND e.experiment_type IN (
+      'normal','overhead_study','retry_study',
+      'failure_injection','quality_sweep','ablation','pilot'
+  );
+"""
+# SPEC_03: Network energy attribution — cross-platform network wait energy
+CREATE_NETWORK_ENERGY_ATTRIBUTION = """
+CREATE TABLE IF NOT EXISTS network_energy_attribution (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id           INTEGER NOT NULL,
+    strategy_used    TEXT    NOT NULL,
+    energy_uj        INTEGER,
+    confidence       REAL    NOT NULL,
+    measurement_type TEXT    NOT NULL,
+    non_local_ms     REAL,
+    window_count     INTEGER NOT NULL DEFAULT 0,
+    coverage_fraction REAL,
+    nic_activity_validated   INTEGER,  -- SPEC_03A: 1=NIC byte movement confirmed during window, 0=not, NULL=not checked
+    nic_adjusted_confidence  REAL,     -- SPEC_03A: confidence penalized 0.75x if no NIC activity during blocking window
+    nic_coverage_fraction    REAL,     -- SPEC_03A: fraction of window covered by nic_samples
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_nea_run_id
+    ON network_energy_attribution(run_id);
+"""
+# SPEC_03A: NIC byte counter samples
+CREATE_NIC_SAMPLES = """
+CREATE TABLE IF NOT EXISTS nic_samples (
+    sample_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       INTEGER NOT NULL,
+    sample_ns    INTEGER NOT NULL,
+    interface    TEXT,
+    tx_bytes     INTEGER,
+    rx_bytes     INTEGER,
+    tx_packets   INTEGER,
+    rx_packets   INTEGER,
+    sample_start_ns INTEGER,
+    sample_end_ns   INTEGER,
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_nic_samples_run_ns
+    ON nic_samples(run_id, sample_ns);
+CREATE INDEX IF NOT EXISTS idx_nic_samples_interval
+    ON nic_samples(run_id, sample_start_ns, sample_end_ns);
+"""
+
+# B2: state_reuse_taxonomy, state_reuse_events, cache_state_snapshots, v_state_reuse_impact
+CREATE_STATE_REUSE = """
+CREATE TABLE IF NOT EXISTS state_reuse_taxonomy (
+    reuse_type_id   TEXT PRIMARY KEY,
+    description     TEXT,
+    layer           TEXT NOT NULL CHECK(layer IN ('serving', 'framework', 'application'))
+);
+
+CREATE TABLE IF NOT EXISTS state_reuse_events (
+    reuse_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    recovery_id           INTEGER REFERENCES recovery_events(recovery_id),
+    attempt_id            INTEGER REFERENCES goal_attempt(attempt_id),
+    run_id                INTEGER REFERENCES runs(run_id),
+    reuse_type            TEXT NOT NULL REFERENCES state_reuse_taxonomy(reuse_type_id),
+    reuse_source          TEXT,
+    tokens_reused         INTEGER CHECK(tokens_reused IS NULL OR tokens_reused >= 0),
+    tokens_recomputed     INTEGER CHECK(tokens_recomputed IS NULL OR tokens_recomputed >= 0),
+    reuse_fraction        REAL CHECK(reuse_fraction IS NULL OR reuse_fraction BETWEEN 0 AND 1),
+    cache_hit             INTEGER CHECK(cache_hit IS NULL OR cache_hit IN (0, 1)),
+    cache_query_time_ns   INTEGER,
+    state_size_bytes      INTEGER CHECK(state_size_bytes IS NULL OR state_size_bytes >= 0),
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_sre_recovery  ON state_reuse_events(recovery_id);
+CREATE INDEX IF NOT EXISTS idx_sre_attempt   ON state_reuse_events(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_sre_run       ON state_reuse_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_sre_type      ON state_reuse_events(reuse_type);
+
+CREATE TABLE IF NOT EXISTS cache_state_snapshots (
+    snapshot_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id                INTEGER REFERENCES runs(run_id),
+    attempt_id            INTEGER REFERENCES goal_attempt(attempt_id),
+    timestamp_ns          INTEGER,
+    engine_name           TEXT,
+    cache_type            TEXT,
+    capacity_tokens       INTEGER CHECK(capacity_tokens IS NULL OR capacity_tokens >= 0),
+    occupied_tokens       INTEGER CHECK(occupied_tokens IS NULL OR occupied_tokens >= 0),
+    occupancy_fraction    REAL CHECK(occupancy_fraction IS NULL OR occupancy_fraction BETWEEN 0 AND 1),
+    hit_rate_aggregate    REAL CHECK(hit_rate_aggregate IS NULL OR hit_rate_aggregate BETWEEN 0 AND 1),
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_css_run      ON cache_state_snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_css_attempt  ON cache_state_snapshots(attempt_id);
+"""
+
+# B3: serving_runtime_snapshots — generic engine telemetry table.
+# Holds KV cache aggregate, expert tier (Colibri), queue state, token rate.
+# Expert tier (Colibri VRAM/RAM/NVMe) MUST NOT go into cache_state_snapshots.
+# See v110_serving_runtime_snapshots.sql and review note 2026-09-22.
+CREATE_SERVING_RUNTIME_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS serving_runtime_snapshots (
+    snapshot_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id                INTEGER REFERENCES runs(run_id),
+    attempt_id            INTEGER REFERENCES goal_attempt(attempt_id),
+    timestamp_ns          INTEGER NOT NULL,
+    engine_name           TEXT NOT NULL,
+    engine_type           TEXT NOT NULL,
+    snapshot_type         TEXT NOT NULL CHECK(snapshot_type IN (
+                              'kv_cache','expert_tier','queue','token_rate'
+                          )),
+    telemetry_scope       TEXT NOT NULL CHECK(telemetry_scope IN (
+                              'request','interval','process','unavailable'
+                          )),
+    kv_capacity_tokens    INTEGER CHECK(kv_capacity_tokens IS NULL OR kv_capacity_tokens >= 0),
+    kv_occupied_tokens    INTEGER CHECK(kv_occupied_tokens IS NULL OR kv_occupied_tokens >= 0),
+    kv_occupancy_fraction REAL    CHECK(kv_occupancy_fraction IS NULL OR kv_occupancy_fraction BETWEEN 0 AND 1),
+    kv_hit_rate_aggregate REAL    CHECK(kv_hit_rate_aggregate IS NULL OR kv_hit_rate_aggregate BETWEEN 0 AND 1),
+    kv_num_evictions      INTEGER CHECK(kv_num_evictions IS NULL OR kv_num_evictions >= 0),
+    tier_vram_bytes       INTEGER CHECK(tier_vram_bytes IS NULL OR tier_vram_bytes >= 0),
+    tier_ram_bytes        INTEGER CHECK(tier_ram_bytes IS NULL OR tier_ram_bytes >= 0),
+    tier_disk_bytes       INTEGER CHECK(tier_disk_bytes IS NULL OR tier_disk_bytes >= 0),
+    tier_vram_fraction    REAL    CHECK(tier_vram_fraction IS NULL OR tier_vram_fraction BETWEEN 0 AND 1),
+    tier_ram_fraction     REAL    CHECK(tier_ram_fraction IS NULL OR tier_ram_fraction BETWEEN 0 AND 1),
+    tier_disk_fraction    REAL    CHECK(tier_disk_fraction IS NULL OR tier_disk_fraction BETWEEN 0 AND 1),
+    queue_active          INTEGER CHECK(queue_active IS NULL OR queue_active >= 0),
+    queue_waiting         INTEGER CHECK(queue_waiting IS NULL OR queue_waiting >= 0),
+    queue_completed       INTEGER CHECK(queue_completed IS NULL OR queue_completed >= 0),
+    queue_rejected        INTEGER CHECK(queue_rejected IS NULL OR queue_rejected >= 0),
+    tokens_per_second     REAL    CHECK(tokens_per_second IS NULL OR tokens_per_second >= 0),
+    ttft_ms               REAL    CHECK(ttft_ms IS NULL OR ttft_ms >= 0),
+    prompt_tokens_total   INTEGER CHECK(prompt_tokens_total IS NULL OR prompt_tokens_total >= 0),
+    generation_tokens_total INTEGER CHECK(generation_tokens_total IS NULL OR generation_tokens_total >= 0),
+    extra_json            TEXT,
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_srs_run       ON serving_runtime_snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_srs_attempt   ON serving_runtime_snapshots(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_srs_engine    ON serving_runtime_snapshots(engine_type, snapshot_type);
+CREATE INDEX IF NOT EXISTS idx_srs_timestamp ON serving_runtime_snapshots(timestamp_ns);
+
+CREATE VIEW IF NOT EXISTS v_state_reuse_impact AS
+SELECT
+    re.recovery_id,
+    re.attempt_id,
+    re.rollback_depth_turns,
+    re.recovery_strategy,
+    re.replay_fraction,
+    re.recovery_energy_uj / 1e6          AS recovery_energy_j,
+    sre.reuse_id,
+    sre.reuse_type,
+    sre.reuse_source,
+    sre.tokens_reused,
+    sre.tokens_recomputed,
+    sre.reuse_fraction                   AS state_reuse_fraction,
+    sre.cache_hit,
+    sre.cache_query_time_ns,
+    sre.state_size_bytes
+FROM recovery_events re
+LEFT JOIN state_reuse_events sre
+    ON re.recovery_id = sre.recovery_id
+ORDER BY
+    re.rollback_depth_turns,
+    sre.reuse_type;
+"""
+# 39.2 WP-2a: plumbing table for WriterSession idempotency keys (D6.3a)
+CREATE_WRITER_IDEMPOTENCY = """
+CREATE TABLE IF NOT EXISTS writer_idempotency (
+    idem_key    TEXT    NOT NULL PRIMARY KEY,
+    recorded_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+CREATE_SANDBOX_IDENTITY = """
+CREATE TABLE IF NOT EXISTS sandbox_identity (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    sandbox_id       TEXT    NOT NULL UNIQUE,
+    name             TEXT    NOT NULL,
+    sandbox_path     TEXT    NOT NULL,
+    engine_version   TEXT    NOT NULL,
+    engine_python    TEXT    NOT NULL,
+    adopted_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    adopted_from     TEXT    NULL
+);
+"""
+CREATE_SPANS = """
+CREATE TABLE IF NOT EXISTS spans (
+    span_id          TEXT    NOT NULL PRIMARY KEY,
+    trace_id         TEXT    NOT NULL,
+    parent_span_id   TEXT,
+    run_id           INTEGER,
+    vocabulary       TEXT    NOT NULL DEFAULT 'generic',
+    vocabulary_version TEXT  NOT NULL DEFAULT '1',
+    kind             TEXT    NOT NULL,
+    name             TEXT    NOT NULL,
+    start_ns         INTEGER NOT NULL,
+    end_ns           INTEGER,
+    start_wall       TEXT,
+    status           TEXT    NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed', 'error')),
+    tenant_kind      TEXT,
+    tenant_ref       TEXT,
+    provenance_ref   TEXT,
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_spans_trace  ON spans(trace_id);
+CREATE INDEX IF NOT EXISTS idx_spans_run    ON spans(run_id);
+CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
+CREATE INDEX IF NOT EXISTS idx_spans_kind   ON spans(kind);
+"""
+
+CREATE_SPAN_PLACEMENTS = """
+CREATE TABLE IF NOT EXISTS span_placements (
+    placement_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    span_id      TEXT    NOT NULL,
+    node         TEXT    NOT NULL,
+    device       TEXT    NOT NULL,
+    phase        TEXT,
+    start_ns     INTEGER NOT NULL,
+    end_ns       INTEGER,
+    FOREIGN KEY (span_id) REFERENCES spans(span_id)
+);
+CREATE INDEX IF NOT EXISTS idx_placements_span ON span_placements(span_id);
+"""
+
+CREATE_SPAN_LINKS = """
+CREATE TABLE IF NOT EXISTS span_links (
+    link_id        INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    span_id        TEXT    NOT NULL,
+    linked_span_id TEXT    NOT NULL,
+    link_type      TEXT    NOT NULL,
+    FOREIGN KEY (span_id) REFERENCES spans(span_id)
+);
+CREATE INDEX IF NOT EXISTS idx_links_span ON span_links(span_id);
+"""
+
+CREATE_SPAN_EVENTS = """
+CREATE TABLE IF NOT EXISTS span_events (
+    event_id   INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    span_id    TEXT    NOT NULL,
+    event_type TEXT    NOT NULL,
+    ts_ns      INTEGER NOT NULL,
+    attributes TEXT,
+    FOREIGN KEY (span_id) REFERENCES spans(span_id)
+);
+CREATE INDEX IF NOT EXISTS idx_events_span ON span_events(span_id);
+"""
+
+CREATE_SPAN_ATTRIBUTES = """
+CREATE TABLE IF NOT EXISTS span_attributes (
+    attr_id    INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    span_id    TEXT    NOT NULL,
+    key        TEXT    NOT NULL,
+    value_text TEXT,
+    value_type TEXT    NOT NULL DEFAULT 'string' CHECK (value_type IN ('string','int','float','bool','json')),
+    UNIQUE (span_id, key),
+    FOREIGN KEY (span_id) REFERENCES spans(span_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attrs_span ON span_attributes(span_id);
+"""
+
+CREATE_SPAN_ANNOTATIONS = """
+CREATE TABLE IF NOT EXISTS span_annotations (
+    annotation_id      INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    span_id            TEXT    NOT NULL,
+    annotation_type    TEXT    NOT NULL,
+    annotation_version TEXT    NOT NULL DEFAULT '1',
+    source             TEXT    NOT NULL,
+    created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    payload            TEXT    NOT NULL,
+    provenance_ref     TEXT,
+    FOREIGN KEY (span_id) REFERENCES spans(span_id)
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_span ON span_annotations(span_id);
+"""
+
+CREATE_ATTRIBUTION_RESIDUAL = """
+CREATE TABLE IF NOT EXISTS attribution_residual (
+    residual_id   INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    run_id        INTEGER NOT NULL,
+    domain        TEXT    NOT NULL,
+    window_label  TEXT    NOT NULL,
+    measured_uj   BIGINT,
+    attributed_uj BIGINT,
+    residual_uj   BIGINT,
+    tolerance_uj  BIGINT,
+    status        TEXT    CHECK (status IN ('ok','large','negative','unmeasured')),
+    created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_residual_run ON attribution_residual(run_id);
+"""
+
+# C-EV stage events and declared stage graphs (v120, 39.5.2c).
+# Contract plumbing (master 5.1); 39.5.5 continues stage_event as stage_run.
+CREATE_STAGE_GRAPH = """
+CREATE TABLE IF NOT EXISTS stage_graph (
+    graph_hash     TEXT PRIMARY KEY,          -- SHA-256 of canonical definition
+    graph_id       TEXT NOT NULL,             -- save_pair | save_single | execute_goal
+    graph_version  TEXT NOT NULL,             -- semver; immutable per version
+    definition     TEXT NOT NULL,             -- canonical JSON (nodes, edges)
+    created_at     TEXT NOT NULL
+);
+"""
+
+CREATE_STAGE_EVENT = """
+CREATE TABLE IF NOT EXISTS stage_event (
+    event_id        TEXT PRIMARY KEY,         -- UUID assigned in memory
+    run_uid         TEXT NOT NULL,            -- identity (master 13.2)
+    run_id          INTEGER REFERENCES runs(run_id),  -- nullable link (EEI-4)
+    sandbox_id      TEXT,
+    stage_id        TEXT NOT NULL CHECK (stage_id IN ('setup','baseline','measure','persist_run',
+                        'persist_samples','spans','attribution','residual','quality','hooks',
+                        'etl_phase','etl_hardware','integrity','outputs')),
+    stage_version   TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('pending','running','succeeded','failed',
+                        'skipped','skipped_dependency')),
+    outcome         TEXT CHECK (outcome IS NULL OR outcome IN ('empty','unavailable','partial')),
+    reason          TEXT,
+    event_seq       INTEGER,                  -- per process gate counter
+    pid             INTEGER NOT NULL,
+    start_ns        INTEGER,
+    end_ns          INTEGER,
+    counts          TEXT,                     -- JSON object table -> rows
+    error_ref       TEXT,                     -- C-ERR error_id (2d)
+    parent_stage_id TEXT,
+    graph_hash      TEXT NOT NULL REFERENCES stage_graph(graph_hash),
+    blocked_by      TEXT,                     -- stage_id causing skipped_dependency
+    scope           TEXT NOT NULL DEFAULT 'run' CHECK (scope IN ('run','pair','goal')),
+    created_at      TEXT NOT NULL,
+    UNIQUE (run_uid, stage_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_event_run_id ON stage_event(run_id);
+CREATE INDEX IF NOT EXISTS idx_stage_event_status ON stage_event(status);
+"""
+
+CREATE_SCHEMA_NAMESPACE_TABLES = """
+CREATE TABLE IF NOT EXISTS schema_namespace_tables (
+    namespace    TEXT NOT NULL,
+    object_name  TEXT NOT NULL,
+    object_kind  TEXT NOT NULL CHECK (object_kind IN ('table','view')),
+    adopted_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (namespace, object_name)
+);
+"""

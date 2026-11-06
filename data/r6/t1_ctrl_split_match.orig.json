@@ -1,0 +1,65 @@
+{
+ "inputs": {
+  "snapshot_sha256": "4e8eabf8af54b73192daf5c0ea7b28f8ee59b1105357b16d09b61ee3dad26cd7",
+  "params_sha256": "089fe00fa408270cb5be05200da3dec0975b31d13144937ef082db8a93611bcc",
+  "export_sha256": "3537f813842af1a4387a46c6c24499cfe2aa1204f5dab21d160aef5613057c5d",
+  "params_version": "r5-1"
+ },
+ "populations_ctrl_beta_e3": {
+  "('r5-1', 'e1_e1b_e2', 'beta_p', 'ctrl_beta', 'e3')": 111
+ },
+ "e3_controller_decisions_snapshot": 333,
+ "export_ids": 333,
+ "export_ids_missing_in_snapshot": 0,
+ "snapshot_ids_missing_in_export": 0,
+ "invocation_by_pid": {
+  "201175": 1,
+  "210979": 2,
+  "220016": 3
+ },
+ "time_gap_cuts_unused": [
+  19046,
+  23537
+ ],
+ "ctrlSplitMatch": "111 of 111",
+ "per_invocation": {
+  "1": {
+   "first_history_goals": 0,
+   "n": 38,
+   "match": 38,
+   "counts_full_ok": 38,
+   "counts_class_ok": 38,
+   "j_ok": 38,
+   "choice_ok": 38,
+   "goal_join_ok": 38
+  },
+  "2": {
+   "first_history_goals": 38,
+   "n": 38,
+   "match": 38,
+   "counts_full_ok": 38,
+   "counts_class_ok": 38,
+   "j_ok": 38,
+   "choice_ok": 38,
+   "goal_join_ok": 38
+  },
+  "3": {
+   "first_history_goals": 76,
+   "n": 35,
+   "match": 35,
+   "counts_full_ok": 35,
+   "counts_class_ok": 35,
+   "j_ok": 35,
+   "choice_ok": 35,
+   "goal_join_ok": 35
+  }
+ },
+ "seed_check_candidates": {
+  "decisions_with_sampling": 111,
+  "hits_by_generator": {
+   "python_random_betavariate+scores_order": 111
+  },
+  "status": "hypothesis until confirmed with raf-ctrl-1c sampler code"
+ },
+ "mismatches": []
+}

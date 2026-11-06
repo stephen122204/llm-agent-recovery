@@ -1,0 +1,984 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+TURBOSTAT READER - Clean Implementation Using pandas
+================================================================================
+
+Author: Deepak Panigrahy
+
+This module provides a clean, robust reader for Intel turbostat output.
+turbostat reads CPU MSRs to provide detailed performance data including:
+- C-state residency percentages (time spent in idle states)
+- CPU frequency during execution
+- iGPU RC6 residency and frequency
+- Package temperature
+- Power estimates for package, cores, GPU, RAM
+
+Requirements Covered:
+Req 1.4 – DVFS Attribution (frequencies)
+Req 1.7 – C-State Residency (via turbostat)
+Req 1.8 – iGPU RC6 & GT Freq
+Req 1.9 – Package Thermal Jitter (temperature)
+Req 1.41 – Deepest Core C-State (via residency columns)
+================================================================================
+"""
+
+import io
+import logging
+import os
+import platform
+import re
+import signal
+import subprocess
+from core.readers.turbostat_resolver import (  # dynamic resolution — never hw_config.json
+    TURBOSTAT_COLUMNS,
+    resolve_turbostat_binary,
+    get_select_string,
+)
+import sys
+import threading
+import time
+from io import StringIO
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from core.readers.interfaces import TurbostatReaderABC
+
+import pandas as pd
+
+# ============================================================================
+# Fix Python path – ensures we can import sibling modules
+# ============================================================================
+project_root = Path(__file__).parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from core.models.energy_measurement import PowerState
+
+# Set up logging for this module
+logger = logging.getLogger(__name__)
+
+
+class TurbostatReader(TurbostatReaderABC):
+    """
+    Reads Intel turbostat metrics using pandas for clean parsing.
+    Inherits TurbostatReaderABC (SPEC 35A — ABC contract enforced).
+ 
+    This class handles:
+    - Starting continuous monitoring of turbostat
+    - Draining output in background thread to prevent pipe buffer full
+    - Stopping monitoring and collecting all samples
+    - Parsing tab-separated output into pandas DataFrame
+    - Computing summary statistics (mean, std, min, max, median)
+    - Mapping columns to our internal PowerState object
+    - Capturing CPU topology for hybrid processors (P-cores/E-cores)
+    - Recording turbostat version for reproducibility
+
+    The reader uses column mappings from hw_config.json, which are
+    detected automatically by Module 0's hardware detection.
+    """
+    # SPEC 35A: registry contract.
+    METHOD_ID: str = "turbostat_reader_x86"
+    FIDELITY = "MEASURED"
+    PRIORITY: int  = 100
+
+    @classmethod
+    def can_handle(cls, caps) -> bool:
+        """Eligible on Linux x86_64, not synthetic platform."""
+        return (
+            caps.os == "Linux"
+            and caps.arch == "x86_64"
+            and getattr(caps, "platform_class", "") != "synthetic"
+        )
+
+    def get_name(self) -> str:
+        """Return reader name for logging and platform summary."""
+        return "TurbostatReader"
+
+    def is_available(self) -> bool:
+        """Return True if turbostat binary was found at init time."""
+        return self.available
+    
+    def __init__(self, config: Dict):
+        """
+        Initialize the TurbostatReader with configuration from Module 0.
+
+        Args:
+            config: The full configuration dictionary loaded from
+                   hw_config.json (contains 'turbostat' section)
+
+        What this does:
+        1. Extracts turbostat-specific configuration
+        2. Sets up column mappings (forward and reverse)
+        3. Locates the real turbostat binary
+        4. Records turbostat version for reproducibility
+        5. Captures CPU topology for hybrid processors
+        """
+        # Get turbostat section from config
+        self.turbostat_config = config.get("turbostat", {})
+ 
+        # Column contract from resolver — never from hw_config.json or yaml.
+        # Single source of truth, versioned in code (TURBOSTAT_COLUMNS v1).
+        self.column_map = TURBOSTAT_COLUMNS
+        self.reverse_map = {v: k for k, v in self.column_map.items()}
+        self._select_string = get_select_string()
+ 
+        # Dynamic binary resolution — self-healing on kernel upgrade.
+        # real_binary from hw_config.json intentionally ignored (Bug 5).
+        # _find_turbostat() uses platform.release() — always current kernel.
+        self.turbostat_path = self._find_turbostat()
+        self.available = self.turbostat_path is not None
+ 
+        if self.available:
+            logger.info("TurbostatReader: binary=%s", self.turbostat_path)
+        else:
+            logger.warning(
+                "turbostat not found — C-states and PkgTmp will be 0. "
+                "Install linux-tools-$(uname -r)."
+            )
+
+
+        # Record turbostat version for reproducibility
+        self.turbostat_version = self._get_turbostat_version()
+        if self.turbostat_version:
+            logger.info(f"Turbostat version: {self.turbostat_version}")
+
+        # Capture CPU topology for hybrid processors (P-cores/E-cores)
+        self.cpu_topology = self._get_cpu_topology()
+        if self.cpu_topology.get("has_hybrid"):
+            logger.info(
+                f"Hybrid CPU detected: {len(self.cpu_topology.get('p_cores', []))} P-cores, "
+                f"{len(self.cpu_topology.get('e_cores', []))} E-cores"
+            )
+
+        # Continuous monitoring attributes
+        self.turbostat_process: Optional[subprocess.Popen] = None
+        self._monitoring_active = False
+        self._start_time: Optional[float] = None
+
+        # FIX: Background thread and buffer for draining output
+        self._output_buffer: List[str] = []
+        self._reader_thread: Optional[threading.Thread] = None
+        self._stop_reader = False
+
+    def is_available(self) -> bool:
+        """
+        Interface parity with BaseReader and every other core/readers/
+        class. energy_engine.py:779/1154 calls this on whatever object
+        self.turbostat holds; on AMD (has_turbostat=False, arch=x86_64)
+        that object is this class, reached for the first time by that
+        exact combination — every other platform's branch structure
+        short-circuits before this call is ever made.
+        """
+        return self.available
+
+    def _find_turbostat(self) -> Optional[str]:
+        """
+        Locate the real turbostat binary.
+
+        On Ubuntu, turbostat is often a wrapper that execs the real binary
+        from a kernel-versioned directory like:
+        /usr/lib/linux-tools/5.15.0/turbostat
+
+        Returns:
+            Path to turbostat binary or None if not found
+        """
+        # Try kernel-specific path first (most reliable)
+        kernel_release = platform.release()
+        kernel_path = f"/usr/lib/linux-tools/{kernel_release}/turbostat"
+        if os.path.exists(kernel_path):
+            return kernel_path
+
+        # Fallback: try to find via 'which' command
+        try:
+            result = subprocess.run(
+                ["which", "turbostat"], capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                wrapper_path = result.stdout.strip()
+                return wrapper_path
+        except:
+            pass
+
+        return None
+
+    def _get_turbostat_version(self) -> Optional[str]:
+        """
+        Get turbostat version for reproducibility.
+
+        This is critical for publications – reviewers may ask
+        which version of tools were used.
+
+        Returns:
+            Version string or None if unavailable
+        """
+        if not self.turbostat_path:
+            return None
+        try:
+            result = subprocess.run(
+                [self.turbostat_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            return result.stdout.strip() or result.stderr.strip()
+        except:
+            return None
+
+    def _get_cpu_topology(self) -> Dict[str, Any]:
+        """
+        Capture CPU topology information for hybrid CPUs (P-cores/E-cores).
+
+        Modern Intel CPUs (Alder Lake, Raptor Lake) have:
+        - Performance cores (P-cores) - higher frequency, more power
+        - Efficiency cores (E-cores) - lower frequency, less power
+
+        This information is critical for accurate interpretation of turbostat data
+        because P-cores and E-cores have different C-state behaviors and frequencies.
+
+        Returns:
+            Dictionary with CPU topology information:
+            - has_hybrid: True if hybrid architecture detected
+            - p_cores: List of P-core IDs (if detectable)
+            - e_cores: List of E-core IDs (if detectable)
+            - raw_lscpu: Complete lscpu output for reference
+        """
+        topology = {"has_hybrid": False, "p_cores": [], "e_cores": [], "raw_lscpu": ""}
+
+        try:
+            # Run lscpu to get CPU information
+            result = subprocess.run(
+                ["lscpu"], capture_output=True, text=True, timeout=2
+            )
+            if result.returncode == 0:
+                topology["raw_lscpu"] = result.stdout
+
+                # Check for hybrid flag
+                for line in result.stdout.split("\n"):
+                    if "Hybrid" in line:
+                        topology["has_hybrid"] = True
+
+                    # Try to parse core type mappings if available
+                    # Format example: "Core P-core:0-3 E-core:4-7"
+                    if "Core" in line and ":" in line:
+                        parts = line.split(":")
+                        if len(parts) > 1:
+                            core_info = parts[1].strip()
+                            if "P-core" in core_info:
+                                # Parse P-core ranges
+                                import re
+
+                                p_ranges = re.findall(r"P-core:([\d,-]+)", core_info)
+                                for r in p_ranges:
+                                    # Expand ranges like "0-3" to [0,1,2,3]
+                                    if "-" in r:
+                                        start, end = map(int, r.split("-"))
+                                        topology["p_cores"].extend(
+                                            list(range(start, end + 1))
+                                        )
+                                    else:
+                                        topology["p_cores"].append(int(r))
+
+                            if "E-core" in core_info:
+                                # Parse E-core ranges
+                                import re
+
+                                e_ranges = re.findall(r"E-core:([\d,-]+)", core_info)
+                                for r in e_ranges:
+                                    if "-" in r:
+                                        start, end = map(int, r.split("-"))
+                                        topology["e_cores"].extend(
+                                            list(range(start, end + 1))
+                                        )
+                                    else:
+                                        topology["e_cores"].append(int(r))
+
+        except Exception as e:
+            logger.debug(f"Failed to get CPU topology: {e}")
+
+        return topology
+
+    def _drain_output(self):
+        """
+        Background thread that continuously reads turbostat output.
+        Uses select() with timeout to prevent blocking.
+        Starts immediately to capture all output.
+        """
+        import select
+
+        logger.debug("Turbostat output drainer thread started")
+
+        if not self.turbostat_process or not self.turbostat_process.stdout:
+            logger.error("No turbostat process or stdout pipe")
+            return
+
+        # Check if pipe is readable
+        import os
+
+        fd = self.turbostat_process.stdout.fileno()
+        logger.debug(f"Turbostat stdout pipe FD: {fd}")
+
+        lines_read = 0
+        while not self._stop_reader:
+            try:
+                # Check if data is available to read (with 100ms timeout)
+                reads, _, _ = select.select(
+                    [self.turbostat_process.stdout], [], [], 0.1
+                )
+
+                if reads:
+                    # Data available, read it
+                    line = self.turbostat_process.stdout.readline()
+                    if line:
+                        self._output_buffer.append(line)
+                        lines_read += 1
+
+                        # Log first few lines to verify data is flowing
+                        if lines_read <= 5:
+                            logger.debug(
+                                f"✅ Turbostat line {lines_read}: {line.strip()[:100]}"
+                            )
+                        elif lines_read == 6:
+                            logger.debug(f"Turbostat drainer continuing to collect...")
+
+                        # Log progress occasionally
+                        if lines_read % 50 == 0:
+                            buffer_size = len("".join(self._output_buffer)) // 1024
+                            logger.debug(
+                                f"Turbostat drainer collected {lines_read} lines, buffer: {buffer_size}KB"
+                            )
+                    else:
+                        # EOF - process probably died
+                        logger.warning("EOF reached on turbostat stdout")
+                        break
+                else:
+                    # No data available - log occasionally to show thread is alive
+                    if lines_read == 0 and time.time() % 2 < 0.1:  # Every ~2 seconds
+                        logger.debug("Turbostat drainer waiting for data...")
+
+            except Exception as e:
+                logger.error(f"Error in turbostat drainer thread: {e}")
+                time.sleep(0.1)
+
+        buffer_size = (
+            len("".join(self._output_buffer)) // 1024 if self._output_buffer else 0
+        )
+        logger.info(
+            f"Turbostat output drainer stopped, collected {lines_read} lines, buffer: {buffer_size}KB"
+        )
+
+    def start_monitoring(self, interval_ms: int = 100):
+        """
+        Start turbostat in continuous mode, collecting data every `interval_ms`.
+        The output is captured by the background drainer thread.
+        """
+        if not self.available:
+            logger.warning(
+                "turbostat not available, cannot start continuous monitoring"
+            )
+            return
+
+        self._monitoring_active = True
+        self._output_buffer = []
+        self._stop_reader = False
+        self._start_time = time.time()
+
+        interval = max(0.1, interval_ms / 1000.0)  # turbostat minimum is 0.1s
+
+        # --show not --select: --select requires exact column name match per kernel version.
+        # --show tolerates unknown/renamed columns gracefully across kernel versions.
+        # Parser extracts columns by header index mapping — not by position or name assumption.
+        # No column subset passed — let turbostat output all available columns.
+        # Parser maps TURBOSTAT_COLUMNS against whatever header this version produces.
+        cmd = [
+            self.turbostat_path,
+            "--quiet",
+            "--Summary",
+            "--interval",
+            str(interval),
+        ]
+
+        logger.debug(f"Starting turbostat: {' '.join(cmd)}")
+        self.turbostat_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+        )
+
+        # Health check: give process 0.5s to crash, then verify alive.
+        # AMD Zen 2 turbostat dies immediately with SIGABRT in rapl_perf_init.
+        # Without this check, available stays True and drainer reads nothing.
+        time.sleep(0.5)
+        if self.turbostat_process.poll() is not None:
+            rc = self.turbostat_process.returncode
+            stderr_out = ""
+            if self.turbostat_process.stderr:
+                stderr_out = self.turbostat_process.stderr.read()
+            logger.warning(
+                "TurbostatReader: process exited immediately (rc=%s). "
+                "C-state columns will be NULL. stderr: %s",
+                rc, stderr_out[:200]
+            )
+            self.turbostat_process = None
+            self.available = False
+            self._monitoring_active = False
+            return
+
+        # Start the drainer thread to collect output as it arrives
+        self._reader_thread = threading.Thread(target=self._drain_output, daemon=True)
+        self._reader_thread.start()
+        logger.info(
+            f"turbostat continuous monitoring started (interval={interval_ms}ms)"
+        )
+
+    def stop_monitoring(self) -> Dict[str, Any]:
+        """
+        Stop turbostat, collect all buffered output, parse into a DataFrame,
+        compute summary statistics, and return everything.
+        """
+        if not self._monitoring_active:
+            logger.warning("stop_monitoring called but monitoring was not active")
+            return {
+                "dataframe": None,
+                "num_samples": 0,
+                "duration_seconds": 0,
+                "summary": {},
+            }
+
+        self._stop_reader = True
+        self._monitoring_active = False
+
+        # Gracefully terminate turbostat
+        if self.turbostat_process:
+            self.turbostat_process.terminate()
+            try:
+                self.turbostat_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.turbostat_process.kill()
+                self.turbostat_process.wait()
+
+        # Wait for the drainer thread to finish
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=2)
+
+        # Collect all output from the buffer
+        output = "".join(self._output_buffer)
+        duration = time.time() - self._start_time if self._start_time else 0
+
+        # Parse the continuous output into a DataFrame
+        df = self._parse_continuous_output(output)
+        num_samples = len(df) if df is not None else 0
+
+        # Compute summary statistics (mean, std, min, max, etc.)
+        summary = self.compute_summary(df) if df is not None else {}
+
+        logger.info(f"turbostat stopped: {num_samples} samples in {duration:.2f}s")
+
+        return {
+            "dataframe": df,
+            "num_samples": num_samples,
+            "duration_seconds": duration,
+            "summary": summary,
+        }
+
+    def _parse_continuous_output(self, output):
+        # type: (str) -> Optional[pd.DataFrame]
+        """
+        Parse continuous turbostat output into a DataFrame.
+ 
+        Design principles (world-class, kernel-version-agnostic):
+        - Header mapped: extract by column name index, never by position
+        - Tab-aware: turbostat uses tabs; fallback to whitespace split
+        - NULL for missing: MIC-1 — missing metric != zero (scientific integrity)
+        - Accepts all data rows regardless of leading character
+        - Works across ALL turbostat versions and ALL kernel versions
+        - No --show/--select column name assumptions
+ 
+        Data row acceptance rules:
+        - Accept: rows where first token is numeric (e.g. "31 1.76 ...")
+        - Accept: rows where first token is "-" (Summary aggregate rows)
+        - Reject: header rows (contain column names like "Busy%")
+        - Reject: empty rows, interval lines ("sec" suffix), warning text
+ 
+        NULL semantics (MIC-1):
+        - Column absent in this turbostat version  -> NULL (not 0.0)
+        - Token present but unparseable            -> NULL (not 0.0)
+        - Token present and parseable as 0.0       -> 0.0 (valid measurement)
+        """
+        if not output or len(output.strip()) < 10:
+            logger.warning("turbostat output too short or empty — no samples collected")
+            return None
+ 
+        try:
+            lines = output.strip().split("\n")
+            logger.debug("turbostat raw output: %d lines", len(lines))
+ 
+            # ------------------------------------------------------------------
+            # Step 1: Find the best header row
+            # Best = most columns (package-level header has more than core header)
+            # turbostat with --Summary emits multiple headers — pick widest one
+            # ------------------------------------------------------------------
+            best_header = None
+            best_header_count = 0
+ 
+            for line in lines:
+                line = line.strip()
+                if not line or line.endswith("sec"):
+                    continue
+ 
+                # Header rows contain known turbostat column markers
+                # and do NOT start with a digit or "-"
+                first_token = line.split("\t")[0] if "\t" in line else line.split()[0]
+                if first_token.lstrip("-").replace("%", "").replace("_", "").isalpha():
+                    # This looks like a header row — split by tab first
+                    cols = line.split("\t") if "\t" in line else re.split(r"\s+", line)
+                    cols = [c.strip() for c in cols if c.strip()]
+                    if len(cols) > best_header_count:
+                        best_header = cols
+                        best_header_count = len(cols)
+ 
+            if not best_header:
+                logger.warning("turbostat: no header row found in output")
+                return None
+ 
+            # Build index map: turbostat_col_name -> position in row
+            # This is the key to kernel-version-agnostic parsing
+            header_index = {col: idx for idx, col in enumerate(best_header)}
+            logger.debug(
+                "turbostat header: %d columns, has PkgTmp=%s",
+                len(best_header),
+                "PkgTmp" in header_index,
+            )
+ 
+            # ------------------------------------------------------------------
+            # Step 2: Extract data rows
+            # Accept numeric-leading AND "-"-leading (Summary aggregate) rows
+            # ------------------------------------------------------------------
+            records = []
+ 
+            for line in lines:
+                line = line.strip()
+                if not line or line.endswith("sec"):
+                    continue
+ 
+                # Split by tab first — turbostat uses tabs
+                tokens = line.split("\t") if "\t" in line else re.split(r"\s+", line)
+                tokens = [t.strip() for t in tokens]
+ 
+                if not tokens:
+                    continue
+ 
+                first = tokens[0]
+ 
+                # Accept numeric-leading rows (core or package rows with digits)
+                is_numeric_row = first.lstrip("-").replace(".", "").isdigit()
+                # Accept "-" summary rows (package aggregate in some versions)
+                is_summary_row = first == "-"
+ 
+                if not (is_numeric_row or is_summary_row):
+                    continue  # skip header rows and warning text
+ 
+                if len(tokens) < len(best_header) // 2:
+                    continue  # skip malformed rows with too few tokens
+ 
+                # ------------------------------------------------------------------
+                # Step 3: Map tokens to column names via header_index
+                # NULL (None) for missing or unparseable — never 0.0 (MIC-1)
+                # ------------------------------------------------------------------
+                record = {}
+                for col_name, idx in header_index.items():
+                    if idx >= len(tokens):
+                        record[col_name] = None  # column missing in this row
+                        continue
+                    try:
+                        record[col_name] = float(tokens[idx])
+                    except (ValueError, TypeError):
+                        record[col_name] = None  # unparseable — not zero (MIC-1)
+ 
+                records.append(record)
+ 
+            if not records:
+                logger.warning("turbostat: no valid data rows found")
+                return None
+ 
+            # ------------------------------------------------------------------
+            # Step 4: Build DataFrame — pandas preserves None as NaN (NULL in DB)
+            # ------------------------------------------------------------------
+            df = pd.DataFrame(records, columns=best_header)
+ 
+            logger.info(
+                "turbostat parsed: %d samples, %d columns, PkgTmp_null=%d",
+                len(df),
+                len(df.columns),
+                df["PkgTmp"].isna().sum() if "PkgTmp" in df.columns else -1,
+            )
+            return df
+ 
+        except Exception as exc:
+            logger.error("turbostat parse error: %s", exc)
+            return None
+
+    def get_column_mapping(self) -> Dict[str, str]:
+        """
+        Get mapping from turbostat column names to internal metric names.
+
+        This uses the 'columns' section from hw_config.json which maps
+        our internal names (like 'cpu_util_percent') to turbostat column names.
+
+        Returns:
+            Dictionary: turbostat_column_name -> internal_metric_name
+        """
+        # The column_map is already stored as self.column_map
+        # But it's in the direction: internal_name -> turbostat_column
+        # We need the reverse for lookup
+
+        reverse_map = {}
+        for internal_name, turbostat_col in self.column_map.items():
+            reverse_map[turbostat_col] = internal_name
+
+        return reverse_map
+
+    def compute_summary(self, df: pd.DataFrame) -> Dict[str, float]:
+        """
+        Compute summary statistics using reverse_map for canonical names.
+        """
+        summary = {}
+
+        if df is None or df.empty:
+            return summary
+
+        # Use all rows (turbostat already gives package summary)
+        for col in df.columns:
+            # Map to internal canonical name if available
+            internal_name = self.reverse_map.get(col, col)
+
+            try:
+                numeric_values = pd.to_numeric(df[col], errors="coerce").dropna()
+
+                if len(numeric_values) > 0:
+                    # Store statistics with canonical names
+                    summary[f"{internal_name}_mean"] = numeric_values.mean()
+                    summary[f"{internal_name}_std"] = numeric_values.std()
+                    summary[f"{internal_name}_min"] = numeric_values.min()
+                    summary[f"{internal_name}_max"] = numeric_values.max()
+                    summary[f"{internal_name}_median"] = numeric_values.median()
+
+                    # Special handling for frequencies (keep for backward compatibility)
+                    if col == "Bzy_MHz":
+                        summary["frequency_busy_mhz"] = numeric_values.mean()
+                        summary["frequency_busy_min"] = numeric_values.min()
+                        summary["frequency_busy_max"] = numeric_values.max()
+
+                    if col == "Avg_MHz":
+                        summary["frequency_avg_mhz"] = numeric_values.mean()
+                        summary["frequency_avg_min"] = numeric_values.min()
+                        summary["frequency_avg_max"] = numeric_values.max()
+
+            except Exception as e:
+                logger.debug(f"Could not process column {col}: {e}")
+
+        # cpu_active_ratio = Avg_MHz / Bzy_MHz
+        # Avg_MHz is wall-clock weighted, Bzy_MHz is active-only weighted.
+        # Their ratio gives the fraction of wall time the CPU was active.
+        avg = summary.get("frequency_avg_mhz") or summary.get("frequency_mean")
+        bzy = summary.get("frequency_busy_mhz")
+        if avg and bzy and bzy > 0:
+            summary["cpu_active_ratio"] = min(avg / bzy, 1.0)
+        else:
+            summary["cpu_active_ratio"] = None
+        return summary
+
+    def save_raw_data(self, df: pd.DataFrame, experiment_id: str) -> Optional[str]:
+        """
+        Save raw turbostat data to CSV for reviewer requests.
+
+        In top-tier publications, reviewers may ask to see raw data.
+        This method allows saving the full dataframe for later analysis.
+
+        Args:
+            df: DataFrame to save
+            experiment_id: Unique identifier for this experiment
+
+        Returns:
+            Path to saved file or None if save failed
+        """
+        if df is None or df.empty:
+            logger.warning("No data to save")
+            return None
+
+        # Create data directory if it doesn't exist
+        data_dir = Path("data/turbostat_raw")
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save with timestamp and experiment ID
+        filename = data_dir / f"turbostat_{experiment_id}_{int(time.time())}.csv"
+
+        try:
+            df.to_csv(filename, index=False)
+            logger.info(f"Raw turbostat data saved to {filename}")
+            return str(filename)
+        except Exception as e:
+            logger.error(f"Failed to save raw data: {e}")
+            return None
+
+    def read_metrics(self, duration_ms: int = 100) -> PowerState:
+        """
+        Run turbostat for a specified duration and return parsed metrics.
+
+        This is the original snapshot method kept for backward compatibility.
+        For new code, use continuous monitoring instead.
+
+        Args:
+            duration_ms: Measurement duration in milliseconds
+
+        Returns:
+            PowerState object with values from the first data row
+        """
+        power_state = PowerState()
+
+        if not self.available or not self.turbostat_path:
+            return power_state
+
+        # Get columns to read
+        columns_to_read = list(self.column_map.values())
+        if not columns_to_read:
+            return power_state
+
+        # turbostat needs at least 100ms
+        interval = max(0.1, duration_ms / 1000)
+
+        # Build command for snapshot measurement
+        cmd = [
+            self.turbostat_path,
+            "--quiet",
+            "--Summary",
+            "--show",
+            ",".join(columns_to_read),
+            "--interval",
+            str(interval),
+            "sleep",
+            str(interval + 0.1),
+        ]
+
+        try:
+            # Run turbostat and capture output
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=interval + 2
+            )
+
+            if result.returncode != 0:
+                return power_state
+
+            # Try stdout first, then stderr
+            df = self._parse_turbostat_output(result.stdout)
+            if df is None or df.empty:
+                df = self._parse_turbostat_output(result.stderr)
+
+            if df is not None and not df.empty:
+                # Convert to numeric
+                for col in df.columns:
+                    try:
+                        df[col] = pd.to_numeric(df[col])
+                    except:
+                        pass
+
+                # Get package-level row for snapshot
+                if "CPU" in df.columns:
+                    package_df = df[df["CPU"] == "-"]
+                    if not package_df.empty and len(package_df) > 0:
+                        row = package_df.iloc[0]
+                    else:
+                        row = df.iloc[0]
+                else:
+                    row = df.iloc[0]
+
+                # Map columns to PowerState fields
+                for col in df.columns:
+                    if col in self.reverse_map:
+                        metric = self.reverse_map[col]
+                        value = row[col]
+                        self._set_metric(power_state, metric, value)
+
+        except Exception as e:
+            logger.error(f"turbostat snapshot error: {e}")
+
+        return power_state
+
+    def _parse_turbostat_output(self, output: str) -> Optional[pd.DataFrame]:
+        """
+        Parse snapshot turbostat output (for backward compatibility).
+
+        Args:
+            output: Raw turbostat output
+
+        Returns:
+            DataFrame with parsed data or None
+        """
+        if not output or len(output.strip()) < 10:
+            return None
+
+        try:
+            lines = output.strip().split("\n")
+
+            # Find header line
+            header_idx = -1
+            for i, line in enumerate(lines):
+                if any(col in line for col in ["Avg_MHz", "Busy%", "Bzy_MHz", "Core"]):
+                    header_idx = i
+                    break
+
+            if header_idx == -1:
+                return None
+
+            # Parse data lines
+            data_lines = "\n".join(lines[header_idx:])
+            df = pd.read_csv(
+                io.StringIO(data_lines),
+                sep="\t",
+                skipinitialspace=True,
+                engine="python",
+            )
+            return df
+
+        except Exception as e:
+            logger.debug(f"Failed to parse turbostat output: {e}")
+            return None
+
+    def _set_metric(self, power_state: PowerState, metric: str, value: float) -> None:
+        """
+        Map a parsed metric value to the appropriate field in PowerState.
+
+        Args:
+            power_state: The object to update
+            metric: Our internal metric name (e.g., 'c1_residency')
+            value: The numeric value
+        """
+        try:
+            # Skip NaN values
+            if pd.isna(value):
+                return
+
+            # C-state residencies (e.g., c1_residency, c6_residency)
+            if metric.startswith("c") and "residency" in metric:
+                c_state = metric.split("_")[0].upper()
+                power_state.c_state_residencies[c_state] = float(value)
+
+            # iGPU metrics
+            elif metric == "gfx_rc6":
+                power_state.igpu_rc6_percent = float(value)
+            elif metric == "gfx_freq":
+                power_state.igpu_frequency_mhz = float(value)
+
+            # Temperature
+            elif metric == "package_temp":
+                power_state.package_temperature_celsius = float(value)
+
+            # Capture both frequency metrics
+            elif metric == "bzy_mhz":
+                # Frequency when CPU is busy
+                power_state.frequencies_mhz[0] = float(value)
+            elif metric == "avg_mhz":
+                # Average frequency including idle time
+                power_state.avg_frequency_mhz = float(value)
+            elif metric == "tsc_mhz":
+                # Time Stamp Counter frequency (constant)
+                power_state.tsc_frequency_mhz = float(value)
+
+            # Power estimates
+            elif metric == "pkg_watts":
+                power_state.package_power_watts = float(value)
+            elif metric == "cor_watts":
+                power_state.core_power_watts = float(value)
+            elif metric == "gfx_watts":
+                power_state.gpu_power_watts = float(value)
+            elif metric == "ram_watts":
+                power_state.ram_power_watts = float(value)
+
+        except Exception as e:
+            logger.debug(f"Failed to set metric {metric}={value}: {e}")
+
+    def __str__(self) -> str:
+        """String representation for debugging."""
+        status = "available" if self.available else "unavailable"
+        hybrid = " (Hybrid)" if self.cpu_topology.get("has_hybrid") else ""
+        return f"TurbostatReader({status}{hybrid}, {len(self.column_map)} columns)"
+
+
+# ============================================================================
+# USAGE EXAMPLE
+# ============================================================================
+
+if __name__ == "__main__":
+    """
+    Example: Test turbostat reader with both snapshot and continuous modes.
+    """
+    import json
+
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    from core.observability.console import get_console
+    con = get_console()
+    con.section("turbostat reader test")
+
+    # Test helper reads the template path; the run path uses resolve_hw_config.
+    config_path = Path("config/hw_config.json")
+    if not config_path.exists():
+        con.line("config file not found: %s" % config_path)
+        sys.exit(1)
+    with open(config_path) as f:
+        config = json.load(f)
+    con.kv("config", config_path)
+
+    reader = TurbostatReader(config)
+    con.line(str(reader))
+    if reader.turbostat_version:
+        con.kv("turbostat version", reader.turbostat_version)
+    if reader.cpu_topology.get("has_hybrid"):
+        con.kv("hybrid cpu", "%d P cores, %d E cores" % (
+            len(reader.cpu_topology.get("p_cores", [])),
+            len(reader.cpu_topology.get("e_cores", []))))
+
+    con.section("snapshot mode, 500 ms")
+    power_state = reader.read_metrics(duration_ms=500)
+    for c, v in sorted((power_state.c_state_residencies or {}).items()):
+        con.kv("%s residency" % c, "%.2f%%" % v)
+    con.kv("frequency busy", "%.0f MHz" % power_state.frequencies_mhz.get(0, 0))
+    if hasattr(power_state, "avg_frequency_mhz") and power_state.avg_frequency_mhz:
+        con.kv("frequency average", "%.0f MHz" % power_state.avg_frequency_mhz)
+    con.kv("temperature", "%.1f C" % power_state.package_temperature_celsius)
+
+    con.section("continuous monitoring, 3 s")
+    reader.start_monitoring()
+    for i in range(3):
+        time.sleep(1)
+    data = reader.stop_monitoring()
+    con.kv("samples", "%s over %.2f s" % (data["num_samples"], data["duration_seconds"]))
+
+    con.section("summary statistics (package level)")
+    summary = data["summary"]
+
+    # Group by metric name for cleaner display
+    metrics = {}
+    for key, value in summary.items():
+        base = key.rsplit("_", 1)[0]
+        stat = key.rsplit("_", 1)[1] if "_" in key else "value"
+        if base not in metrics:
+            metrics[base] = {}
+        metrics[base][stat] = value
+
+    for metric, stats in sorted(metrics.items()):
+        if metric and not metric.startswith("Time"):
+            parts = ["%s %.2f" % (k, stats[k]) for k in ("mean", "median", "std", "min", "max") if k in stats]
+            con.kv(metric, ", ".join(parts))
+
+    if data["dataframe"] is not None:
+        filename = reader.save_raw_data(data["dataframe"], "test_run")
+        if filename:
+            con.kv("raw data saved", filename)
+    con.line("turbostat reader test complete")

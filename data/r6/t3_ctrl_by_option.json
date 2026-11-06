@@ -1,0 +1,831 @@
+{
+ "all_goals_headline": {
+  "excluded_blocks": 0,
+  "ctrl_beta": {
+   "all_options": {
+    "n": 111,
+    "achieved": 95,
+    "success_rate": 0.8558558558558559,
+    "success_wilson95": [
+     0.7786,
+     0.9093
+    ],
+    "mean_board_j": 1248.4257946971152,
+    "board_j_per_achieved": 1458.6869811724187,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_cold": {
+    "n": 5,
+    "achieved": 3,
+    "success_rate": 0.6,
+    "success_wilson95": [
+     0.2307,
+     0.8824
+    ],
+    "mean_board_j": 1385.9910480625595,
+    "board_j_per_achieved": 2309.9850801042658,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 52,
+    "achieved": 46,
+    "success_rate": 0.8846153846153846,
+    "success_wilson95": [
+     0.7703,
+     0.946
+    ],
+    "mean_board_j": 1232.639237885923,
+    "board_j_per_achieved": 1393.4182689145216,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SG_warm": {
+    "n": 28,
+    "achieved": 26,
+    "success_rate": 0.9285714285714286,
+    "success_wilson95": [
+     0.7735,
+     0.9802
+    ],
+    "mean_board_j": 1222.5798814234931,
+    "board_j_per_achieved": 1316.6244876868386,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_cold": {
+    "n": 25,
+    "achieved": 19,
+    "success_rate": 0.76,
+    "success_wilson95": [
+     0.5657,
+     0.885
+    ],
+    "mean_board_j": 1296.4131754740963,
+    "board_j_per_achieved": 1705.8068098343372,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 1,
+    "achieved": 1,
+    "success_rate": 1.0,
+    "success_wilson95": [
+     0.2065,
+     1.0
+    ],
+    "mean_board_j": 905.5015342887843,
+    "board_j_per_achieved": 905.5015342887843,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "xstar_rule": {
+   "all_options": {
+    "n": 111,
+    "achieved": 98,
+    "success_rate": 0.8828828828828829,
+    "success_wilson95": [
+     0.8099,
+     0.9303
+    ],
+    "mean_board_j": 1241.6581757495949,
+    "board_j_per_achieved": 1406.3679337571941,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 56,
+    "achieved": 50,
+    "success_rate": 0.8928571428571429,
+    "success_wilson95": [
+     0.7853,
+     0.95
+    ],
+    "mean_board_j": 1267.7927152249197,
+    "board_j_per_achieved": 1419.92784105191,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 55,
+    "achieved": 48,
+    "success_rate": 0.8727272727272727,
+    "success_wilson95": [
+     0.7598,
+     0.937
+    ],
+    "mean_board_j": 1215.0484628292638,
+    "board_j_per_achieved": 1392.243030325198,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "token_rule": {
+   "all_options": {
+    "n": 111,
+    "achieved": 100,
+    "success_rate": 0.9009009009009009,
+    "success_wilson95": [
+     0.8312,
+     0.9438
+    ],
+    "mean_board_j": 1167.3692603077611,
+    "board_j_per_achieved": 1295.779878941615,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "RB_warm": {
+    "n": 98,
+    "achieved": 91,
+    "success_rate": 0.9285714285714286,
+    "success_wilson95": [
+     0.8598,
+     0.965
+    ],
+    "mean_board_j": 1143.116282658612,
+    "board_j_per_achieved": 1231.048304401582,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 13,
+    "achieved": 9,
+    "success_rate": 0.6923076923076923,
+    "success_wilson95": [
+     0.4237,
+     0.8732
+    ],
+    "mean_board_j": 1350.19939950904,
+    "board_j_per_achieved": 1950.2880215130579,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  }
+ },
+ "flags_e3_excl_flag": {
+  "excluded_blocks": 20,
+  "ctrl_beta": {
+   "all_options": {
+    "n": 91,
+    "achieved": 78,
+    "success_rate": 0.8571428571428571,
+    "success_wilson95": [
+     0.7708,
+     0.9146
+    ],
+    "mean_board_j": 1248.066872350896,
+    "board_j_per_achieved": 1456.078017742712,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_cold": {
+    "n": 5,
+    "achieved": 3,
+    "success_rate": 0.6,
+    "success_wilson95": [
+     0.2307,
+     0.8824
+    ],
+    "mean_board_j": 1385.9910480625595,
+    "board_j_per_achieved": 2309.9850801042658,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 41,
+    "achieved": 36,
+    "success_rate": 0.8780487804878049,
+    "success_wilson95": [
+     0.7446,
+     0.9468
+    ],
+    "mean_board_j": 1198.8821235370672,
+    "board_j_per_achieved": 1365.3935295838821,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SG_warm": {
+    "n": 23,
+    "achieved": 22,
+    "success_rate": 0.9565217391304348,
+    "success_wilson95": [
+     0.7901,
+     0.9923
+    ],
+    "mean_board_j": 1252.8374569418877,
+    "board_j_per_achieved": 1309.7846140756099,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_cold": {
+    "n": 21,
+    "achieved": 16,
+    "success_rate": 0.7619047619047619,
+    "success_wilson95": [
+     0.5491,
+     0.8937
+    ],
+    "mean_board_j": 1322.3428587927033,
+    "board_j_per_achieved": 1735.5750021654233,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 1,
+    "achieved": 1,
+    "success_rate": 1.0,
+    "success_wilson95": [
+     0.2065,
+     1.0
+    ],
+    "mean_board_j": 905.5015342887843,
+    "board_j_per_achieved": 905.5015342887843,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "xstar_rule": {
+   "all_options": {
+    "n": 91,
+    "achieved": 80,
+    "success_rate": 0.8791208791208791,
+    "success_wilson95": [
+     0.7964,
+     0.9311
+    ],
+    "mean_board_j": 1237.7161779569321,
+    "board_j_per_achieved": 1407.9021524260104,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 45,
+    "achieved": 40,
+    "success_rate": 0.8888888888888888,
+    "success_wilson95": [
+     0.765,
+     0.9516
+    ],
+    "mean_board_j": 1233.0677998228493,
+    "board_j_per_achieved": 1387.2012748007055,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 46,
+    "achieved": 40,
+    "success_rate": 0.8695652173913043,
+    "success_wilson95": [
+     0.7433,
+     0.9388
+    ],
+    "mean_board_j": 1242.263504392448,
+    "board_j_per_achieved": 1428.6030300513153,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "token_rule": {
+   "all_options": {
+    "n": 91,
+    "achieved": 82,
+    "success_rate": 0.9010989010989011,
+    "success_wilson95": [
+     0.8226,
+     0.9471
+    ],
+    "mean_board_j": 1165.902826043134,
+    "board_j_per_achieved": 1293.8677703649412,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "RB_warm": {
+    "n": 80,
+    "achieved": 74,
+    "success_rate": 0.925,
+    "success_wilson95": [
+     0.8459,
+     0.9652
+    ],
+    "mean_board_j": 1141.733611835603,
+    "board_j_per_achieved": 1234.306607389841,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 11,
+    "achieved": 8,
+    "success_rate": 0.7272727272727273,
+    "success_wilson95": [
+     0.4343,
+     0.9025
+    ],
+    "mean_board_j": 1341.6789293706317,
+    "board_j_per_achieved": 1844.8085278846186,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  }
+ },
+ "flags_e3_excl_heavy": {
+  "excluded_blocks": 5,
+  "ctrl_beta": {
+   "all_options": {
+    "n": 106,
+    "achieved": 91,
+    "success_rate": 0.8584905660377359,
+    "success_wilson95": [
+     0.7796,
+     0.9123
+    ],
+    "mean_board_j": 1254.2786966847539,
+    "board_j_per_achieved": 1461.027932402021,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_cold": {
+    "n": 5,
+    "achieved": 3,
+    "success_rate": 0.6,
+    "success_wilson95": [
+     0.2307,
+     0.8824
+    ],
+    "mean_board_j": 1385.9910480625595,
+    "board_j_per_achieved": 2309.9850801042658,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 51,
+    "achieved": 45,
+    "success_rate": 0.8823529411764706,
+    "success_wilson95": [
+     0.7662,
+     0.945
+    ],
+    "mean_board_j": 1235.9531055069424,
+    "board_j_per_achieved": 1400.746852907868,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SG_warm": {
+    "n": 27,
+    "achieved": 25,
+    "success_rate": 0.9259259259259259,
+    "success_wilson95": [
+     0.7663,
+     0.9794
+    ],
+    "mean_board_j": 1223.653931005321,
+    "board_j_per_achieved": 1321.5462454857468,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_cold": {
+    "n": 22,
+    "achieved": 17,
+    "success_rate": 0.7727272727272727,
+    "success_wilson95": [
+     0.5656,
+     0.8988
+    ],
+    "mean_board_j": 1320.2645707265722,
+    "board_j_per_achieved": 1708.5776797637993,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 1,
+    "achieved": 1,
+    "success_rate": 1.0,
+    "success_wilson95": [
+     0.2065,
+     1.0
+    ],
+    "mean_board_j": 905.5015342887843,
+    "board_j_per_achieved": 905.5015342887843,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "xstar_rule": {
+   "all_options": {
+    "n": 106,
+    "achieved": 93,
+    "success_rate": 0.8773584905660378,
+    "success_wilson95": [
+     0.8014,
+     0.9269
+    ],
+    "mean_board_j": 1251.5849524333703,
+    "board_j_per_achieved": 1426.5376877197552,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 55,
+    "achieved": 49,
+    "success_rate": 0.8909090909090909,
+    "success_wilson95": [
+     0.7817,
+     0.949
+    ],
+    "mean_board_j": 1272.420710947286,
+    "board_j_per_achieved": 1428.2273286143006,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 51,
+    "achieved": 44,
+    "success_rate": 0.8627450980392157,
+    "success_wilson95": [
+     0.7428,
+     0.9319
+    ],
+    "mean_board_j": 1229.1150167811084,
+    "board_j_per_achieved": 1424.6560421781028,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "token_rule": {
+   "all_options": {
+    "n": 106,
+    "achieved": 95,
+    "success_rate": 0.8962264150943396,
+    "success_wilson95": [
+     0.8237,
+     0.9411
+    ],
+    "mean_board_j": 1171.6568760439625,
+    "board_j_per_achieved": 1307.322409059579,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "RB_warm": {
+    "n": 93,
+    "achieved": 86,
+    "success_rate": 0.9247311827956989,
+    "success_wilson95": [
+     0.8527,
+     0.9631
+    ],
+    "mean_board_j": 1146.699319000457,
+    "board_j_per_achieved": 1240.0353100818897,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 13,
+    "achieved": 9,
+    "success_rate": 0.6923076923076923,
+    "success_wilson95": [
+     0.4237,
+     0.8732
+    ],
+    "mean_board_j": 1350.19939950904,
+    "board_j_per_achieved": 1950.2880215130579,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  }
+ },
+ "flags_e3_v2_excl_flag": {
+  "excluded_blocks": 23,
+  "ctrl_beta": {
+   "all_options": {
+    "n": 88,
+    "achieved": 75,
+    "success_rate": 0.8522727272727273,
+    "success_wilson95": [
+     0.7635,
+     0.9116
+    ],
+    "mean_board_j": 1237.263324327745,
+    "board_j_per_achieved": 1451.7223005445542,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_cold": {
+    "n": 5,
+    "achieved": 3,
+    "success_rate": 0.6,
+    "success_wilson95": [
+     0.2307,
+     0.8824
+    ],
+    "mean_board_j": 1385.9910480625595,
+    "board_j_per_achieved": 2309.9850801042658,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 41,
+    "achieved": 36,
+    "success_rate": 0.8780487804878049,
+    "success_wilson95": [
+     0.7446,
+     0.9468
+    ],
+    "mean_board_j": 1198.8821235370672,
+    "board_j_per_achieved": 1365.3935295838821,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SG_warm": {
+    "n": 21,
+    "achieved": 20,
+    "success_rate": 0.9523809523809523,
+    "success_wilson95": [
+     0.7733,
+     0.9915
+    ],
+    "mean_board_j": 1223.2385197466533,
+    "board_j_per_achieved": 1284.400445733986,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_cold": {
+    "n": 20,
+    "achieved": 15,
+    "success_rate": 0.75,
+    "success_wilson95": [
+     0.5313,
+     0.8881
+    ],
+    "mean_board_j": 1310.0769893270258,
+    "board_j_per_achieved": 1746.769319102701,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 1,
+    "achieved": 1,
+    "success_rate": 1.0,
+    "success_wilson95": [
+     0.2065,
+     1.0
+    ],
+    "mean_board_j": 905.5015342887843,
+    "board_j_per_achieved": 905.5015342887843,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "xstar_rule": {
+   "all_options": {
+    "n": 88,
+    "achieved": 77,
+    "success_rate": 0.875,
+    "success_wilson95": [
+     0.7899,
+     0.9287
+    ],
+    "mean_board_j": 1227.2200686160259,
+    "board_j_per_achieved": 1402.537221275458,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 45,
+    "achieved": 40,
+    "success_rate": 0.8888888888888888,
+    "success_wilson95": [
+     0.765,
+     0.9516
+    ],
+    "mean_board_j": 1233.0677998228493,
+    "board_j_per_achieved": 1387.2012748007055,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 43,
+    "achieved": 37,
+    "success_rate": 0.8604651162790697,
+    "success_wilson95": [
+     0.7274,
+     0.9344
+    ],
+    "mean_board_j": 1221.1003499112105,
+    "board_j_per_achieved": 1419.1166228697853,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "token_rule": {
+   "all_options": {
+    "n": 88,
+    "achieved": 79,
+    "success_rate": 0.8977272727272727,
+    "success_wilson95": [
+     0.8169,
+     0.9453
+    ],
+    "mean_board_j": 1151.1164584906883,
+    "board_j_per_achieved": 1282.2563081921592,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "RB_warm": {
+    "n": 77,
+    "achieved": 71,
+    "success_rate": 0.922077922077922,
+    "success_wilson95": [
+     0.8402,
+     0.9638
+    ],
+    "mean_board_j": 1123.8932483649821,
+    "board_j_per_achieved": 1218.8701425930087,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 11,
+    "achieved": 8,
+    "success_rate": 0.7272727272727273,
+    "success_wilson95": [
+     0.4343,
+     0.9025
+    ],
+    "mean_board_j": 1341.6789293706317,
+    "board_j_per_achieved": 1844.8085278846186,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  }
+ },
+ "flags_e3_v2_excl_heavy": {
+  "excluded_blocks": 5,
+  "ctrl_beta": {
+   "all_options": {
+    "n": 106,
+    "achieved": 91,
+    "success_rate": 0.8584905660377359,
+    "success_wilson95": [
+     0.7796,
+     0.9123
+    ],
+    "mean_board_j": 1254.2786966847539,
+    "board_j_per_achieved": 1461.027932402021,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_cold": {
+    "n": 5,
+    "achieved": 3,
+    "success_rate": 0.6,
+    "success_wilson95": [
+     0.2307,
+     0.8824
+    ],
+    "mean_board_j": 1385.9910480625595,
+    "board_j_per_achieved": 2309.9850801042658,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 51,
+    "achieved": 45,
+    "success_rate": 0.8823529411764706,
+    "success_wilson95": [
+     0.7662,
+     0.945
+    ],
+    "mean_board_j": 1235.9531055069424,
+    "board_j_per_achieved": 1400.746852907868,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SG_warm": {
+    "n": 27,
+    "achieved": 25,
+    "success_rate": 0.9259259259259259,
+    "success_wilson95": [
+     0.7663,
+     0.9794
+    ],
+    "mean_board_j": 1223.653931005321,
+    "board_j_per_achieved": 1321.5462454857468,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_cold": {
+    "n": 22,
+    "achieved": 17,
+    "success_rate": 0.7727272727272727,
+    "success_wilson95": [
+     0.5656,
+     0.8988
+    ],
+    "mean_board_j": 1320.2645707265722,
+    "board_j_per_achieved": 1708.5776797637993,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 1,
+    "achieved": 1,
+    "success_rate": 1.0,
+    "success_wilson95": [
+     0.2065,
+     1.0
+    ],
+    "mean_board_j": 905.5015342887843,
+    "board_j_per_achieved": 905.5015342887843,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "xstar_rule": {
+   "all_options": {
+    "n": 106,
+    "achieved": 93,
+    "success_rate": 0.8773584905660378,
+    "success_wilson95": [
+     0.8014,
+     0.9269
+    ],
+    "mean_board_j": 1251.5849524333703,
+    "board_j_per_achieved": 1426.5376877197552,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "FR_warm": {
+    "n": 55,
+    "achieved": 49,
+    "success_rate": 0.8909090909090909,
+    "success_wilson95": [
+     0.7817,
+     0.949
+    ],
+    "mean_board_j": 1272.420710947286,
+    "board_j_per_achieved": 1428.2273286143006,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 51,
+    "achieved": 44,
+    "success_rate": 0.8627450980392157,
+    "success_wilson95": [
+     0.7428,
+     0.9319
+    ],
+    "mean_board_j": 1229.1150167811084,
+    "board_j_per_achieved": 1424.6560421781028,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  },
+  "token_rule": {
+   "all_options": {
+    "n": 106,
+    "achieved": 95,
+    "success_rate": 0.8962264150943396,
+    "success_wilson95": [
+     0.8237,
+     0.9411
+    ],
+    "mean_board_j": 1171.6568760439625,
+    "board_j_per_achieved": 1307.322409059579,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "RB_warm": {
+    "n": 93,
+    "achieved": 86,
+    "success_rate": 0.9247311827956989,
+    "success_wilson95": [
+     0.8527,
+     0.9631
+    ],
+    "mean_board_j": 1146.699319000457,
+    "board_j_per_achieved": 1240.0353100818897,
+    "missing_energy": 0,
+    "missing_success": 0
+   },
+   "SR_warm": {
+    "n": 13,
+    "achieved": 9,
+    "success_rate": 0.6923076923076923,
+    "success_wilson95": [
+     0.4237,
+     0.8732
+    ],
+    "mean_board_j": 1350.19939950904,
+    "board_j_per_achieved": 1950.2880215130579,
+    "missing_energy": 0,
+    "missing_success": 0
+   }
+  }
+ },
+ "macros": {
+  "ctrlEpgByOption": "all_goals_headline.ctrl_beta.<option>.board_j_per_achieved",
+  "ctrlSuccessByOption": "all_goals_headline.ctrl_beta.<option>.success_rate"
+ }
+}

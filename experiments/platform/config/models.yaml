@@ -1,0 +1,52 @@
+# Configure the provider and served model IDs for the measurement node.
+_defaults:
+  temperature: 0.7
+  max_tokens: 2048
+  modes:
+  - linear
+  - agentic
+  tasks:
+  - text-generation
+  available: true
+  tools_supported: false
+providers:
+  vllm_local:
+    is_local: true
+    access_method: api_http
+    network_type: loopback
+    captures_network_io: true
+    energy_side: full
+    openai_compat: true
+    base_url: http://127.0.0.1:8000/v1
+    api_key_env: null
+    cost_class: free
+    priority: 1
+    rate_limit_tpm: null
+    defaults:
+      max_tokens: 1024
+    models:
+    - id: Mistral-7B-Instruct-v0.3
+      name: Mistral 7B Instruct (vLLM GPU)
+    - id: Qwen3-32B-AWQ
+      name: Qwen3 32B AWQ (vLLM GPU)
+    - id: Qwen3-30B-A3B
+      name: Qwen3 30B A3B MoE (vLLM GPU)
+    - id: sarvam-m
+      name: Sarvam M (vLLM GPU)
+    - id: Qwen2.5-Coder-32B-Instruct
+      name: Qwen2.5 Coder 32B (vLLM GPU)
+    - id: Qwen3-4B-Instruct-2507
+      name: Qwen3 4B Instruct 2507 (vLLM GPU, RAF pilot candidate)
+    - id: Qwen3-30B-A3B-Instruct-2507-FP8
+      name: Qwen3 30B A3B Instruct 2507 FP8 (vLLM GPU, RAF main study)
+    - id: Mistral-Small-3.2-24B-Instruct-2506
+      name: Mistral Small 3.2 24B Instruct 2506 (vLLM GPU, RAF second model)
+    - id: gpt-oss-20b
+      name: gpt-oss 20B MXFP4 (vLLM GPU, RAF third model)
+    - id: Llama-3.1-8B-Instruct
+      name: Llama 3.1 8B Instruct bf16 (vLLM GPU, RAF second model)
+    - id: granite-3.3-8b-instruct
+      name: IBM Granite 3.3 8B Instruct bf16 (vLLM GPU, RAF second model fallback)
+    execution_site: host
+    transport: loopback_http
+    remote_energy_available: false

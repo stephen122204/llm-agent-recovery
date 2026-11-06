@@ -1,0 +1,54 @@
+[project]
+name = "alems-plugin-bfcl"
+version = "0.3.0"
+description = "BFCL multi turn tool provider, tasks and state scorer for A-LEMS (RAF LH 01)"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0 (vendored BFCL code and data); plugin code per A-LEMS"}
+dependencies = [
+    "alems-sdk>=1.0,<2.0",
+    "mpmath>=1.3",   # required by the vendored BFCL MathAPI
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+# Stateful BFCL tools for one goal execution (C-TOOL; side effects in memory only).
+[project.entry-points."alems.tools"]
+bfcl = "alems_plugin_bfcl.provider:BFCLToolProvider"
+
+# Deterministic replay of the upstream BFCL multi turn checker.
+[project.entry-points."alems.scorers"]
+bfcl_state = "alems_plugin_bfcl.scorer:BFCLStateScorer"
+
+# Tool calling agent loop with injection hooks and FR/SR recovery (RAF LH 01, S1b).
+[project.entry-points."alems.frameworks"]
+bfcl_react = "alems_plugin_bfcl.react:BFCLReactAdapter"
+raf_sweep = "alems_plugin_bfcl.sweep:SweepAdapter"
+
+# RAF hooks for scheduled profiles (alems run; core/execution/scheduled_runner.py).
+[project.entry-points."alems.harness.prepare"]
+bfcl = "alems_plugin_bfcl.raf_hooks:make_prepare"
+sweep = "alems_plugin_bfcl.sweep:make_prepare"
+
+[project.entry-points."alems.harness.deciders"]
+ctrl_beta = "alems_plugin_bfcl.decider.adapter:ctrl_beta"
+ctrl_laya = "alems_plugin_bfcl.decider.adapter:ctrl_laya"
+escalate_stub = "alems_plugin_bfcl.raf_hooks:escalate_stub"
+keep = "alems_plugin_bfcl.raf_hooks:keep"
+token_rule = "alems_plugin_bfcl.decider.token_rule:token_rule"
+xstar_rule = "alems_plugin_bfcl.decider.xstar_rule:xstar_rule"
+ear = "alems_plugin_bfcl.decider.ear:ear"
+
+[project.entry-points."alems.harness.validity"]
+bfcl_raf = "alems_plugin_bfcl.raf_hooks:classify"
+sweep = "alems_plugin_bfcl.sweep:classify"
+
+[tool.setuptools]
+packages = ["alems_plugin_bfcl", "alems_plugin_bfcl.upstream"]
+
+[tool.setuptools.package-data]
+alems_plugin_bfcl = ["data/*.json", "data/possible_answer/*.json", "data/multi_turn_func_doc/*.json"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

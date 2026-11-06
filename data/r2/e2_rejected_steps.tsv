@@ -1,0 +1,311 @@
+# e2_rejected_steps.py; rule: tool reply at detail.fired_step starts with react._ERROR_PREFIX ('Error during execution: ') or is a JSON object with an 'error' key (BFCL tool error); snapshot inputs/run/experiments.db
+goal_id	rerun	item_id	fired_step	tool	status	reply_start
+2547	0	bfcl_multi_turn_base_71|wrong_model_step|early	5	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2548	0	bfcl_multi_turn_base_71|wrong_model_step|early	5	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2549	0	bfcl_multi_turn_base_71|wrong_model_step|early	5	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2550	0	bfcl_multi_turn_base_71|wrong_model_step|early	5	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2551	0	bfcl_multi_turn_base_71|wrong_model_step|early	5	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2552	0	bfcl_multi_turn_base_71|wrong_model_step|early	5	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2557	0	bfcl_multi_turn_base_110|wrong_model_step|late	5	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2558	0	bfcl_multi_turn_base_110|wrong_model_step|late	5	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2559	0	bfcl_multi_turn_base_110|wrong_model_step|late	5	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2560	0	bfcl_multi_turn_base_110|wrong_model_step|late	5	cancel_order	rejected	{"error": "Order with ID 12449 not found."}
+2561	0	bfcl_multi_turn_base_110|wrong_model_step|late	5	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2562	0	bfcl_multi_turn_base_110|wrong_model_step|late	5	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2563	0	bfcl_multi_turn_base_59|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2564	0	bfcl_multi_turn_base_59|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2565	0	bfcl_multi_turn_base_59|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2566	0	bfcl_multi_turn_base_59|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2567	0	bfcl_multi_turn_base_59|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2568	0	bfcl_multi_turn_base_59|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2574	0	bfcl_multi_turn_base_86|wrong_model_step|early	9	set_navigation	accepted	{"status": "Navigating to running"}
+2575	0	bfcl_multi_turn_base_86|wrong_model_step|early	9	set_navigation	accepted	{"status": "Navigating to passenger"}
+2576	0	bfcl_multi_turn_base_86|wrong_model_step|early	9	set_navigation	accepted	{"status": "Navigating to engage"}
+2577	0	bfcl_multi_turn_base_86|wrong_model_step|early	9	set_navigation	accepted	{"status": "Navigating to passenger"}
+2578	0	bfcl_multi_turn_base_86|wrong_model_step|early	9	set_navigation	accepted	{"status": "Navigating to rear_left"}
+2579	0	bfcl_multi_turn_base_86|wrong_model_step|early	9	set_navigation	accepted	{"status": "Navigating to running"}
+2582	0	bfcl_multi_turn_base_193|wrong_model_step|late	4	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2583	0	bfcl_multi_turn_base_193|wrong_model_step|late	4	cancel_booking	rejected	{"cancel_status": false, "error": "Invalid access token"}
+2584	0	bfcl_multi_turn_base_193|wrong_model_step|late	4	cancel_booking	rejected	{"cancel_status": false, "error": "Invalid access token"}
+2585	0	bfcl_multi_turn_base_193|wrong_model_step|late	4	cancel_booking	rejected	{"cancel_status": false, "error": "Invalid access token"}
+2586	0	bfcl_multi_turn_base_193|wrong_model_step|late	4	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2587	0	bfcl_multi_turn_base_193|wrong_model_step|late	4	cancel_booking	rejected	{"cancel_status": false, "error": "Invalid access token"}
+2608	0	bfcl_multi_turn_base_149|wrong_model_step|late	6	delete_message	rejected	{"error": "Receiver ID My name is John. I want to connect. n
+2609	0	bfcl_multi_turn_base_149|wrong_model_step|late	6	delete_message	rejected	{"error": "Receiver ID ZETA not found."}
+2610	0	bfcl_multi_turn_base_149|wrong_model_step|late	6	delete_message	rejected	{"error": "Receiver ID I've decided to drop those dipping st
+2611	0	bfcl_multi_turn_base_149|wrong_model_step|late	6	delete_message	rejected	{"error": "Receiver ID Message sent to 'USR003' successfully
+2612	0	bfcl_multi_turn_base_149|wrong_model_step|late	6	delete_message	rejected	{"error": "Receiver ID NVDA not found."}
+2613	0	bfcl_multi_turn_base_149|wrong_model_step|late	6	delete_message	rejected	{"error": "Receiver ID Stock ZETA removed from watchlist suc
+2619	0	bfcl_multi_turn_base_52|wrong_model_step|early	7	post_tweet	accepted	{"id": 10, "username": "roadtripper2023", "content": "Tires 
+2620	0	bfcl_multi_turn_base_52|wrong_model_step|early	7	post_tweet	accepted	{"id": 10, "username": "roadtripper2023", "content": "@AutoU
+2621	0	bfcl_multi_turn_base_52|wrong_model_step|early	7	post_tweet	accepted	{"id": 10, "username": "roadtripper2023", "content": "@AutoU
+2622	0	bfcl_multi_turn_base_52|wrong_model_step|early	7	post_tweet	accepted	{"id": 10, "username": "roadtripper2023", "content": "Tires 
+2623	0	bfcl_multi_turn_base_52|wrong_model_step|early	7	post_tweet	accepted	{"id": 10, "username": "roadtripper2023", "content": "Tires 
+2624	0	bfcl_multi_turn_base_52|wrong_model_step|early	7	post_tweet	accepted	{"id": 10, "username": "roadtripper2023", "content": "Tires 
+2627	0	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2628	1	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2629	0	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2630	1	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2631	0	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2632	1	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2633	0	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2634	1	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2635	0	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2636	1	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2637	0	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2638	1	bfcl_multi_turn_base_94|wrong_model_step|late	None		unknown(no tool fault fired)	
+2640	0	bfcl_multi_turn_base_183|wrong_model_step|late	7	cancel_booking	rejected	{"cancel_status": false, "error": "Invalid access token"}
+2641	0	bfcl_multi_turn_base_183|wrong_model_step|late	7	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2642	0	bfcl_multi_turn_base_183|wrong_model_step|late	7	cancel_booking	rejected	{"cancel_status": false, "error": "Invalid access token"}
+2643	0	bfcl_multi_turn_base_183|wrong_model_step|late	7	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2644	0	bfcl_multi_turn_base_183|wrong_model_step|late	7	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2645	0	bfcl_multi_turn_base_183|wrong_model_step|late	7	cancel_booking	rejected	{"cancel_status": false, "error": "Invalid access token"}
+2646	0	bfcl_multi_turn_base_134|wrong_model_step|early	6	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2647	0	bfcl_multi_turn_base_134|wrong_model_step|early	6	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2648	0	bfcl_multi_turn_base_134|wrong_model_step|early	6	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2649	0	bfcl_multi_turn_base_134|wrong_model_step|early	6	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2650	0	bfcl_multi_turn_base_134|wrong_model_step|early	6	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2651	0	bfcl_multi_turn_base_134|wrong_model_step|early	6	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2661	0	bfcl_multi_turn_base_48|wrong_model_step|early	7	edit_ticket	accepted	{"status": "Ticket 654321 has been updated successfully."}
+2662	0	bfcl_multi_turn_base_48|wrong_model_step|early	7	edit_ticket	accepted	{"status": "Ticket 654321 has been updated successfully."}
+2663	0	bfcl_multi_turn_base_48|wrong_model_step|early	7	edit_ticket	rejected	{"error": "Ticket with ID 654323 not found."}
+2664	0	bfcl_multi_turn_base_48|wrong_model_step|early	7	edit_ticket	accepted	{"status": "Ticket 654321 has been updated successfully."}
+2665	0	bfcl_multi_turn_base_48|wrong_model_step|early	7	edit_ticket	rejected	{"error": "Ticket with ID 654323 not found."}
+2666	0	bfcl_multi_turn_base_48|wrong_model_step|early	7	edit_ticket	rejected	{"error": "Ticket with ID 654323 not found."}
+2667	0	bfcl_multi_turn_base_122|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12449 not found."}
+2668	0	bfcl_multi_turn_base_122|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2669	0	bfcl_multi_turn_base_122|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2670	0	bfcl_multi_turn_base_122|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2671	0	bfcl_multi_turn_base_122|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2672	0	bfcl_multi_turn_base_122|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2673	0	bfcl_multi_turn_base_170|wrong_model_step|late	8	post_tweet	accepted	{"id": 0, "username": "michael_smith", "content": "#Travel",
+2674	0	bfcl_multi_turn_base_170|wrong_model_step|late	8	post_tweet	accepted	{"id": 0, "username": "michael_smith", "content": "#Adventur
+2675	0	bfcl_multi_turn_base_170|wrong_model_step|late	8	post_tweet	accepted	{"id": 0, "username": "michael_smith", "content": "Exploring
+2676	0	bfcl_multi_turn_base_170|wrong_model_step|late	8	post_tweet	accepted	{"id": 0, "username": "michael_smith", "content": "Exploring
+2677	0	bfcl_multi_turn_base_170|wrong_model_step|late	8	post_tweet	accepted	{"id": 0, "username": "michael_smith", "content": "Exploring
+2678	0	bfcl_multi_turn_base_170|wrong_model_step|late	8	post_tweet	accepted	{"id": 0, "username": "michael_smith", "content": "Exploring
+2680	0	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2681	1	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2682	0	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2683	1	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2684	0	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2685	1	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2686	0	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2687	1	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2688	0	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2689	1	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2690	0	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2691	1	bfcl_multi_turn_base_194|wrong_model_step|late	None		unknown(no tool fault fired)	
+2694	0	bfcl_multi_turn_base_141|wrong_model_step|late	7	send_message	rejected	{"error": "Receiver ID '100 shares of GOOG purchased, though
+2695	0	bfcl_multi_turn_base_141|wrong_model_step|late	7	send_message	rejected	{"error": "Receiver ID '100 shares of GOOG purchased, though
+2696	0	bfcl_multi_turn_base_141|wrong_model_step|late	7	send_message	accepted	{"sent_status": true, "message_id": {"new_id": 67410}, "mess
+2697	0	bfcl_multi_turn_base_141|wrong_model_step|late	7	send_message	rejected	{"error": "Receiver ID '100 shares of GOOG purchased, though
+2698	0	bfcl_multi_turn_base_141|wrong_model_step|late	7	send_message	rejected	{"error": "Receiver ID '100 shares of GOOG purchased, though
+2699	0	bfcl_multi_turn_base_141|wrong_model_step|late	7	send_message	rejected	{"error": "Receiver ID '100 shares of GOOG purchased, though
+2702	0	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2703	1	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2704	0	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2705	1	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2706	0	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2707	1	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2708	0	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2709	1	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2710	0	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2711	1	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2712	0	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2713	1	bfcl_multi_turn_base_123|wrong_model_step|late	6		not_applied	
+2744	0	bfcl_multi_turn_base_17|wrong_model_step|early	7	add_contact	accepted	{"added_status": true, "user_id": "USR005", "message": "Cont
+2745	0	bfcl_multi_turn_base_17|wrong_model_step|early	7	add_contact	accepted	{"added_status": true, "user_id": "USR005", "message": "Cont
+2746	0	bfcl_multi_turn_base_17|wrong_model_step|early	7	add_contact	accepted	{"added_status": true, "user_id": "USR005", "message": "Cont
+2747	0	bfcl_multi_turn_base_17|wrong_model_step|early	7	add_contact	accepted	{"added_status": true, "user_id": "USR005", "message": "Cont
+2748	0	bfcl_multi_turn_base_17|wrong_model_step|early	7	add_contact	accepted	{"added_status": true, "user_id": "USR005", "message": "Cont
+2749	0	bfcl_multi_turn_base_17|wrong_model_step|early	7	add_contact	accepted	{"added_status": true, "user_id": "USR005", "message": "Cont
+2753	0	bfcl_multi_turn_base_127|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock NVDA removed from watchlist successfully."
+2754	0	bfcl_multi_turn_base_127|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock NVDA removed from watchlist successfully."
+2755	0	bfcl_multi_turn_base_127|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock NVDA removed from watchlist successfully."
+2756	0	bfcl_multi_turn_base_127|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock NVDA removed from watchlist successfully."
+2757	0	bfcl_multi_turn_base_127|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock NVDA removed from watchlist successfully."
+2758	0	bfcl_multi_turn_base_127|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock NVDA removed from watchlist successfully."
+2761	0	bfcl_multi_turn_base_118|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock TSLA removed from watchlist successfully."
+2762	0	bfcl_multi_turn_base_118|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock GOOG removed from watchlist successfully."
+2763	0	bfcl_multi_turn_base_118|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock TSLA removed from watchlist successfully."
+2764	0	bfcl_multi_turn_base_118|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock GOOG removed from watchlist successfully."
+2765	0	bfcl_multi_turn_base_118|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock TSLA removed from watchlist successfully."
+2766	0	bfcl_multi_turn_base_118|wrong_model_step|early	2	remove_stock_from_watchlist	accepted	{"status": "Stock TSLA removed from watchlist successfully."
+2769	0	bfcl_multi_turn_base_14|wrong_model_step|early	5	message_login	accepted	{"login_status": false, "message": "User ID 'Line 1: Introdu
+2770	0	bfcl_multi_turn_base_14|wrong_model_step|early	5	message_login	accepted	{"login_status": false, "message": "User ID 'Line 1: Introdu
+2771	0	bfcl_multi_turn_base_14|wrong_model_step|early	5	message_login	accepted	{"login_status": false, "message": "User ID 'ResearchDocs' n
+2772	0	bfcl_multi_turn_base_14|wrong_model_step|early	5	message_login	accepted	{"login_status": false, "message": "User ID '.' not found."}
+2773	0	bfcl_multi_turn_base_14|wrong_model_step|early	5	message_login	accepted	{"login_status": false, "message": "User ID '.' not found."}
+2774	0	bfcl_multi_turn_base_14|wrong_model_step|early	5	message_login	accepted	{"login_status": false, "message": "User ID './report.csv' n
+2783	0	bfcl_multi_turn_base_85|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2784	0	bfcl_multi_turn_base_85|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2785	0	bfcl_multi_turn_base_85|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2786	0	bfcl_multi_turn_base_85|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2787	0	bfcl_multi_turn_base_85|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2788	0	bfcl_multi_turn_base_85|wrong_model_step|early	6	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2794	0	bfcl_multi_turn_base_123|wrong_model_step|early	5	cancel_order	rejected	{"error": "Order with ID 12449 not found."}
+2795	0	bfcl_multi_turn_base_123|wrong_model_step|early	5	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2796	0	bfcl_multi_turn_base_123|wrong_model_step|early	5	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2797	0	bfcl_multi_turn_base_123|wrong_model_step|early	5	cancel_order	rejected	{"error": "Order with ID 12449 not found."}
+2798	0	bfcl_multi_turn_base_123|wrong_model_step|early	5	cancel_order	rejected	{"error": "Order with ID 12449 not found."}
+2799	0	bfcl_multi_turn_base_123|wrong_model_step|early	5	cancel_order	rejected	{"error": "Order with ID 12449 not found."}
+2804	0	bfcl_multi_turn_base_170|wrong_model_step|early	5	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2805	0	bfcl_multi_turn_base_170|wrong_model_step|early	5	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2806	0	bfcl_multi_turn_base_170|wrong_model_step|early	5	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2807	0	bfcl_multi_turn_base_170|wrong_model_step|early	5	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2808	0	bfcl_multi_turn_base_170|wrong_model_step|early	5	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2809	0	bfcl_multi_turn_base_170|wrong_model_step|early	5	cancel_booking	rejected	{"cancel_status": false, "error": "Booking not found"}
+2810	0	bfcl_multi_turn_base_1|wrong_model_step|early	6		unknown(replies 37 != tools 38)	
+2811	1	bfcl_multi_turn_base_1|wrong_model_step|early	6		unknown(replies 37 != tools 38)	
+2812	0	bfcl_multi_turn_base_1|wrong_model_step|early	6	mv	accepted	{"result": "'archive' moved to 'archive/archive'"}
+2813	0	bfcl_multi_turn_base_1|wrong_model_step|early	6		unknown(replies 37 != tools 38)	
+2814	1	bfcl_multi_turn_base_1|wrong_model_step|early	6	mv	accepted	{"result": "'archive' moved to 'archive/archive'"}
+2815	0	bfcl_multi_turn_base_1|wrong_model_step|early	6		unknown(replies 37 != tools 38)	
+2816	1	bfcl_multi_turn_base_1|wrong_model_step|early	6	mv	accepted	{"result": "'archive' moved to 'archive/archive'"}
+2817	0	bfcl_multi_turn_base_1|wrong_model_step|early	6	mv	accepted	{"result": "'archive' moved to 'archive/archive'"}
+2818	0	bfcl_multi_turn_base_1|wrong_model_step|early	6	mv	accepted	{"result": "'archive' moved to 'archive/archive'"}
+2822	0	bfcl_multi_turn_base_52|wrong_model_step|late	8	comment	accepted	{"comment_status": "Comment added successfully"}
+2823	0	bfcl_multi_turn_base_52|wrong_model_step|late	8	comment	rejected	{"error": "Tweet with ID 11 not found."}
+2824	0	bfcl_multi_turn_base_52|wrong_model_step|late	8	comment	rejected	{"error": "Tweet with ID 11 not found."}
+2825	0	bfcl_multi_turn_base_52|wrong_model_step|late	8	comment	accepted	{"comment_status": "Comment added successfully"}
+2826	0	bfcl_multi_turn_base_52|wrong_model_step|late	8	comment	rejected	{"error": "Tweet with ID 13 not found."}
+2827	0	bfcl_multi_turn_base_52|wrong_model_step|late	8	comment	rejected	{"error": "Tweet with ID 11 not found."}
+2828	0	bfcl_multi_turn_base_71|wrong_model_step|late	9	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+2829	0	bfcl_multi_turn_base_71|wrong_model_step|late	9	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+2830	0	bfcl_multi_turn_base_71|wrong_model_step|late	9	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+2831	0	bfcl_multi_turn_base_71|wrong_model_step|late	9	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+2832	0	bfcl_multi_turn_base_71|wrong_model_step|late	9	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+2833	0	bfcl_multi_turn_base_71|wrong_model_step|late	9	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+2836	0	bfcl_multi_turn_base_127|wrong_model_step|late	4	place_order	rejected	{"error": "Invalid stock symbol: Buy"}
+2837	0	bfcl_multi_turn_base_127|wrong_model_step|late	4	place_order	rejected	{"error": "Invalid stock symbol: Buy"}
+2838	0	bfcl_multi_turn_base_127|wrong_model_step|late	4	place_order	rejected	{"error": "Invalid stock symbol: Buy"}
+2839	0	bfcl_multi_turn_base_127|wrong_model_step|late	4	place_order	rejected	{"error": "Invalid stock symbol: Buy"}
+2840	0	bfcl_multi_turn_base_127|wrong_model_step|late	4	place_order	accepted	{"order_id": 12446, "order_type": "BDX", "status": "Pending"
+2841	0	bfcl_multi_turn_base_127|wrong_model_step|late	4	place_order	accepted	{"order_id": 12446, "order_type": "BDX", "status": "Pending"
+2867	0	bfcl_multi_turn_base_141|wrong_model_step|early	4	place_order	accepted	{"order_id": 12446, "order_type": "Buy", "status": "Pending"
+2868	0	bfcl_multi_turn_base_141|wrong_model_step|early	4	place_order	rejected	{"error": "Invalid stock symbol: Buy"}
+2869	0	bfcl_multi_turn_base_141|wrong_model_step|early	4	place_order	accepted	{"order_id": 12446, "order_type": "GOOG", "status": "Pending
+2870	0	bfcl_multi_turn_base_141|wrong_model_step|early	4	place_order	rejected	{"error": "Insufficient funds: required $426051.00 but only 
+2871	0	bfcl_multi_turn_base_141|wrong_model_step|early	4	place_order	rejected	{"error": "Invalid stock symbol: Buy"}
+2872	0	bfcl_multi_turn_base_141|wrong_model_step|early	4	place_order	rejected	{"error": "Insufficient funds: required $426051.00 but only 
+2890	0	bfcl_multi_turn_base_105|wrong_model_step|early	4	add_to_watchlist	accepted	{"watchlist": ["NVDA"]}
+2891	0	bfcl_multi_turn_base_105|wrong_model_step|early	4	add_to_watchlist	accepted	{"watchlist": ["NVDA"]}
+2892	0	bfcl_multi_turn_base_105|wrong_model_step|early	4	add_to_watchlist	accepted	{"watchlist": ["NVDA", "GOOG"]}
+2893	0	bfcl_multi_turn_base_105|wrong_model_step|early	4	add_to_watchlist	accepted	{"watchlist": ["NVDA"]}
+2894	0	bfcl_multi_turn_base_105|wrong_model_step|early	4	add_to_watchlist	accepted	{"watchlist": ["NVDA", "GOOG"]}
+2895	0	bfcl_multi_turn_base_105|wrong_model_step|early	4	add_to_watchlist	accepted	{"watchlist": ["NVDA", "QUAS"]}
+2900	0	bfcl_multi_turn_base_149|wrong_model_step|early	4	send_message	accepted	{"sent_status": true, "message_id": {"new_id": 67410}, "mess
+2901	0	bfcl_multi_turn_base_149|wrong_model_step|early	4	send_message	rejected	{"error": "Receiver ID 'I've decided to drop those dipping s
+2902	0	bfcl_multi_turn_base_149|wrong_model_step|early	4	send_message	rejected	{"error": "Receiver ID 'I've decided to drop those dipping s
+2903	0	bfcl_multi_turn_base_149|wrong_model_step|early	4	send_message	accepted	{"sent_status": true, "message_id": {"new_id": 67410}, "mess
+2904	0	bfcl_multi_turn_base_149|wrong_model_step|early	4	send_message	rejected	{"error": "Receiver ID 'I've decided to drop those dipping s
+2905	0	bfcl_multi_turn_base_149|wrong_model_step|early	4	send_message	rejected	{"error": "Receiver ID 'I've decided to drop those dipping s
+2906	0	bfcl_multi_turn_base_112|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2907	0	bfcl_multi_turn_base_112|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2908	0	bfcl_multi_turn_base_112|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12449 not found."}
+2909	0	bfcl_multi_turn_base_112|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12447 not found."}
+2910	0	bfcl_multi_turn_base_112|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12448 not found."}
+2911	0	bfcl_multi_turn_base_112|wrong_model_step|early	4	cancel_order	rejected	{"error": "Order with ID 12449 not found."}
+2936	0	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2937	1	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2938	0	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2939	1	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2940	0	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2941	1	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2942	0	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2943	1	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2944	0	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2945	1	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2946	0	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2947	1	bfcl_multi_turn_base_94|wrong_model_step|early	None		unknown(no tool fault fired)	
+2957	0	bfcl_multi_turn_base_88|wrong_model_step|late	7	pressBrakePedal	rejected	{"error": "Pedal position must be between 0 and 1."}
+2958	0	bfcl_multi_turn_base_88|wrong_model_step|late	7	pressBrakePedal	rejected	{"error": "Pedal position must be between 0 and 1."}
+2959	0	bfcl_multi_turn_base_88|wrong_model_step|late	7	pressBrakePedal	rejected	{"error": "Pedal position must be between 0 and 1."}
+2960	0	bfcl_multi_turn_base_88|wrong_model_step|late	7	pressBrakePedal	rejected	{"error": "Pedal position must be between 0 and 1."}
+2961	0	bfcl_multi_turn_base_88|wrong_model_step|late	7	pressBrakePedal	rejected	{"error": "Pedal position must be between 0 and 1."}
+2962	0	bfcl_multi_turn_base_88|wrong_model_step|late	7	pressBrakePedal	rejected	{"error": "Pedal position must be between 0 and 1."}
+2992	0	bfcl_multi_turn_base_88|wrong_model_step|early	3	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2993	0	bfcl_multi_turn_base_88|wrong_model_step|early	3	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2994	0	bfcl_multi_turn_base_88|wrong_model_step|early	3	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2995	0	bfcl_multi_turn_base_88|wrong_model_step|early	3	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2996	0	bfcl_multi_turn_base_88|wrong_model_step|early	3	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2997	0	bfcl_multi_turn_base_88|wrong_model_step|early	3	fillFuelTank	rejected	{"error": "Cannot fill gas above the tank capacity."}
+2998	0	bfcl_multi_turn_base_59|wrong_model_step|late	8	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+2999	0	bfcl_multi_turn_base_59|wrong_model_step|late	8	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+3000	0	bfcl_multi_turn_base_59|wrong_model_step|late	8	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+3001	0	bfcl_multi_turn_base_59|wrong_model_step|late	8	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+3002	0	bfcl_multi_turn_base_59|wrong_model_step|late	8	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+3003	0	bfcl_multi_turn_base_59|wrong_model_step|late	8	lockDoors	accepted	{"lockStatus": "locked", "remainingUnlockedDoors": 1}
+3008	0	bfcl_multi_turn_base_193|wrong_model_step|early	3	book_flight	rejected	{"booking_status": false, "error": "Invalid date format. Use
+3009	0	bfcl_multi_turn_base_193|wrong_model_step|early	3	book_flight	rejected	{"booking_status": false, "error": "Invalid travel class. Mu
+3010	0	bfcl_multi_turn_base_193|wrong_model_step|early	3	book_flight	rejected	{"booking_status": false, "error": "Invalid date format. Use
+3011	0	bfcl_multi_turn_base_193|wrong_model_step|early	3	book_flight	rejected	{"booking_status": false, "error": "Invalid destination airp
+3012	0	bfcl_multi_turn_base_193|wrong_model_step|early	3	book_flight	rejected	{"booking_status": false, "error": "Card not registered"}
+3013	0	bfcl_multi_turn_base_193|wrong_model_step|early	3	book_flight	rejected	{"booking_status": false, "error": "Invalid departure airpor
+3032	0	bfcl_multi_turn_base_86|wrong_model_step|late	11	post_tweet	accepted	{"id": 3, "username": "traveler123", "content": "Thank you t
+3033	0	bfcl_multi_turn_base_86|wrong_model_step|late	11	post_tweet	accepted	{"id": 3, "username": "traveler123", "content": "Thank you t
+3034	0	bfcl_multi_turn_base_86|wrong_model_step|late	11	post_tweet	accepted	{"id": 3, "username": "traveler123", "content": "#Journey", 
+3035	0	bfcl_multi_turn_base_86|wrong_model_step|late	11	post_tweet	accepted	{"id": 3, "username": "traveler123", "content": "Thank you t
+3036	0	bfcl_multi_turn_base_86|wrong_model_step|late	11	post_tweet	accepted	{"id": 3, "username": "traveler123", "content": "Thank you t
+3037	0	bfcl_multi_turn_base_86|wrong_model_step|late	11	post_tweet	accepted	{"id": 3, "username": "traveler123", "content": "Thank you t
+3056	0	bfcl_multi_turn_base_34|wrong_model_step|early	7	touch	rejected	{"error": "touch: cannot touch 'echo: cannot write to 'stati
+3057	0	bfcl_multi_turn_base_34|wrong_model_step|early	7	touch	accepted	None
+3058	0	bfcl_multi_turn_base_34|wrong_model_step|early	7	touch	accepted	None
+3059	0	bfcl_multi_turn_base_34|wrong_model_step|early	7	touch	rejected	{"error": "touch: cannot touch 'Revenue: $5000Expenses: $300
+3060	0	bfcl_multi_turn_base_34|wrong_model_step|early	7	touch	rejected	{"error": "touch: cannot touch 'Revenue: $5000Expenses: $300
+3061	0	bfcl_multi_turn_base_34|wrong_model_step|early	7	touch	rejected	{"error": "touch: cannot touch 'Revenue: \\$': Invalid chara
+3062	0	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3063	1	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3064	0	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3065	1	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3066	0	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3067	1	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3068	0	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3069	1	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3070	0	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3071	1	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3072	0	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3073	1	bfcl_multi_turn_base_194|wrong_model_step|early	None		unknown(no tool fault fired)	
+3079	0	bfcl_multi_turn_base_118|wrong_model_step|late	4	place_order	accepted	{"order_id": 12446, "order_type": "AAPL", "status": "Pending
+3080	0	bfcl_multi_turn_base_118|wrong_model_step|late	4	place_order	rejected	{"error": "Invalid stock symbol: Buy"}
+3081	0	bfcl_multi_turn_base_118|wrong_model_step|late	4	place_order	accepted	{"order_id": 12446, "order_type": "Buy", "status": "Pending"
+3082	0	bfcl_multi_turn_base_118|wrong_model_step|late	4	place_order	accepted	{"order_id": 12446, "order_type": "Buy", "status": "Pending"
+3083	0	bfcl_multi_turn_base_118|wrong_model_step|late	4	place_order	accepted	{"order_id": 12446, "order_type": "Buy", "status": "Pending"
+3084	0	bfcl_multi_turn_base_118|wrong_model_step|late	4	place_order	rejected	{"error": "Invalid stock symbol: Buy"}
+3089	0	bfcl_multi_turn_base_110|wrong_model_step|early	3	place_order	accepted	{"order_id": 12446, "order_type": "Buy", "status": "Pending"
+3090	0	bfcl_multi_turn_base_110|wrong_model_step|early	3	place_order	accepted	{"order_id": 12446, "order_type": "AAPL", "status": "Pending
+3091	0	bfcl_multi_turn_base_110|wrong_model_step|early	3	place_order	accepted	{"order_id": 12446, "order_type": "Buy", "status": "Pending"
+3092	0	bfcl_multi_turn_base_110|wrong_model_step|early	3	place_order	accepted	{"order_id": 12446, "order_type": "Buy", "status": "Pending"
+3093	0	bfcl_multi_turn_base_110|wrong_model_step|early	3	place_order	rejected	{"error": "Invalid stock symbol: Buy"}
+3094	0	bfcl_multi_turn_base_110|wrong_model_step|early	3	place_order	accepted	{"order_id": 12446, "order_type": "Buy", "status": "Pending"
+3097	0	bfcl_multi_turn_base_183|wrong_model_step|early	4	book_flight	rejected	{"booking_status": false, "error": "Invalid date format. Use
+3098	0	bfcl_multi_turn_base_183|wrong_model_step|early	4	book_flight	rejected	{"booking_status": false, "error": "Invalid destination airp
+3099	0	bfcl_multi_turn_base_183|wrong_model_step|early	4	book_flight	rejected	{"booking_status": false, "error": "Invalid travel class. Mu
+3100	0	bfcl_multi_turn_base_183|wrong_model_step|early	4	book_flight	rejected	{"booking_status": false, "error": "Invalid travel class. Mu
+3101	0	bfcl_multi_turn_base_183|wrong_model_step|early	4	book_flight	rejected	{"booking_status": false, "error": "Invalid departure airpor
+3102	0	bfcl_multi_turn_base_183|wrong_model_step|early	4	book_flight	rejected	{"booking_status": false, "error": "No available route for t
+3117	0	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3118	1	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3119	0	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3120	1	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3121	0	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3122	1	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3123	0	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3124	1	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3125	0	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3126	1	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3127	0	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3128	1	bfcl_multi_turn_base_122|wrong_model_step|late	5		not_applied	
+3132	0	bfcl_multi_turn_base_154|wrong_model_step|early	5	book_flight	rejected	{"booking_status": false, "error": "No available route for t
+3133	0	bfcl_multi_turn_base_154|wrong_model_step|early	5	book_flight	rejected	{"booking_status": false, "error": "Invalid date format. Use
+3134	0	bfcl_multi_turn_base_154|wrong_model_step|early	5	book_flight	rejected	{"booking_status": false, "error": "Card not registered"}
+3135	0	bfcl_multi_turn_base_154|wrong_model_step|early	5	book_flight	rejected	{"booking_status": false, "error": "Invalid departure airpor
+3136	0	bfcl_multi_turn_base_154|wrong_model_step|early	5	book_flight	rejected	{"booking_status": false, "error": "Invalid destination airp
+3137	0	bfcl_multi_turn_base_154|wrong_model_step|early	5	book_flight	rejected	{"booking_status": false, "error": "Invalid date format. Use
+3144	0	bfcl_multi_turn_base_39|wrong_model_step|early	4	touch	accepted	None
+3145	0	bfcl_multi_turn_base_39|wrong_model_step|early	4	touch	rejected	{"error": "touch: cannot touch 'echo: cannot write to 'style
+3146	0	bfcl_multi_turn_base_39|wrong_model_step|early	4	touch	accepted	None
+3147	0	bfcl_multi_turn_base_39|wrong_model_step|early	4	touch	accepted	None
+3148	0	bfcl_multi_turn_base_39|wrong_model_step|early	4	touch	rejected	{"error": "touch: cannot touch 'echo: cannot write to 'style
+3149	0	bfcl_multi_turn_base_39|wrong_model_step|early	4	touch	rejected	{"error": "touch: cannot touch 'echo: cannot write to 'style

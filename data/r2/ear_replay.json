@@ -1,0 +1,43 @@
+{
+ "earSelectorTokenShare": {
+  "k": 111,
+  "n": 111
+ },
+ "earReplayMatch": {
+  "k": 111,
+  "n": 111
+ },
+ "decisions_sha256": "3537f813842af1a4387a46c6c24499cfe2aa1204f5dab21d160aef5613057c5d",
+ "selector_sha256": "179b83863744f584ec6bf4d28153b1ecb85c05bb985d672e81aeabb44507bbc3",
+ "detail": {
+  "replay_a_e3_params": {
+   "k": 111,
+   "n": 111,
+   "params_version": "r5-1",
+   "params_sha256": "089fe00fa408270cb5be05200da3dec0975b31d13144937ef082db8a93611bcc"
+  },
+  "replay_b_params": {
+   "params_version": "r5-1",
+   "params_sha256": "97ecd54a677f55d06967678fe6def2f318524c4713f97a0b9592de445a97076b"
+  },
+  "decider_used": {
+   "token_rule": 111
+  },
+  "classes": {
+   "tool_error": 55,
+   "json_parse": 56
+  },
+  "calls_done_range": [
+   3,
+   21
+  ],
+  "p_range": [
+   0.5605,
+   0.5826
+  ],
+  "class_not_in_selector": 0,
+  "ear_sha256": "d5f190144e3fb74f6bf602e24f6ba87dbf72e187ff235d933dc01cd4a33c6b7a",
+  "mismatches_b": [],
+  "scope": "routing and token_rule.choose replayed; ear.__call__ (in goal wrapper) not exercised"
+ }
+}

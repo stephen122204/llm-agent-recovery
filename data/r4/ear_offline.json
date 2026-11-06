@@ -1,0 +1,117 @@
+{
+ "inputs": {
+  "db_sha256": "d5fa57f5a4f0ff5e8c48ff6788cb009ee887f2accb5793b55dfba1779b5dbbf5",
+  "params_sha256": "97ecd54a677f55d06967678fe6def2f318524c4713f97a0b9592de445a97076b",
+  "selector_sha256": "179b83863744f584ec6bf4d28153b1ecb85c05bb985d672e81aeabb44507bbc3"
+ },
+ "values": {
+  "earMistralVsRestart": "18.3",
+  "earMistralVsRestartLo": "9.1",
+  "earMistralVsRestartHi": "25.1",
+  "earMistralVsResume": "4.3",
+  "earMistralVsResumeLo": "-6.2",
+  "earMistralVsResumeHi": "14.7",
+  "earMistralVsRollback": "8.4",
+  "earMistralVsRollbackLo": "-11.5",
+  "earMistralVsRollbackHi": "27.6",
+  "earMistralOk": "59 of 64",
+  "earMistralOkLo": "83",
+  "earMistralOkHi": "97",
+  "earMistralRestrictedShare": "58 of 64",
+  "earMistralRestrictedSharePct": "90.6",
+  "earMistralCostRoute": "0",
+  "earGptossVsRestart": "26.5",
+  "earGptossVsRestartLo": "17.9",
+  "earGptossVsRestartHi": "36.0",
+  "earGptossVsResume": "18.8",
+  "earGptossVsResumeLo": "6.1",
+  "earGptossVsResumeHi": "30.7",
+  "earGptossVsRollback": "24.3",
+  "earGptossVsRollbackLo": "8.6",
+  "earGptossVsRollbackHi": "38.6",
+  "earGptossOk": "87 of 96",
+  "earGptossOkLo": "83",
+  "earGptossOkHi": "95",
+  "earGptossRestrictedShare": "82 of 96",
+  "earGptossRestrictedSharePct": "85.4",
+  "earGptossCostRoute": "0"
+ },
+ "provenance": {
+  "earMistralVsRestart": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs FR_warm, 8 tasks",
+  "earMistralVsRestartLo": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs FR_warm, 8 tasks",
+  "earMistralVsRestartHi": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs FR_warm, 8 tasks",
+  "earMistralVsResume": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs SR_warm, 8 tasks; NOT SIGNIFICANT: 95 percent CI includes 0",
+  "earMistralVsResumeLo": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs SR_warm, 8 tasks; NOT SIGNIFICANT: 95 percent CI includes 0",
+  "earMistralVsResumeHi": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs SR_warm, 8 tasks; NOT SIGNIFICANT: 95 percent CI includes 0",
+  "earMistralVsRollback": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs RB_cold, 8 tasks; NOT SIGNIFICANT: 95 percent CI includes 0",
+  "earMistralVsRollbackLo": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs RB_cold, 8 tasks; NOT SIGNIFICANT: 95 percent CI includes 0",
+  "earMistralVsRollbackHi": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs RB_cold, 8 tasks; NOT SIGNIFICANT: 95 percent CI includes 0",
+  "earMistralOk": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, correct goals",
+  "earMistralOkLo": "Wilson 95, Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower",
+  "earMistralOkHi": "Wilson 95, Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower",
+  "earMistralRestrictedShare": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, items where the unrestricted pick (all options) is an option this study never ran",
+  "earMistralRestrictedSharePct": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, percent",
+  "earMistralCostRoute": "Mistral, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 64 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, items routed to the cost model (not scored)",
+  "earGptossVsRestart": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs FR_warm, 12 tasks",
+  "earGptossVsRestartLo": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs FR_warm, 12 tasks",
+  "earGptossVsRestartHi": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs FR_warm, 12 tasks",
+  "earGptossVsResume": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs SR_warm, 12 tasks",
+  "earGptossVsResumeLo": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs SR_warm, 12 tasks",
+  "earGptossVsResumeHi": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs SR_warm, 12 tasks",
+  "earGptossVsRollback": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs RB_cold, 12 tasks",
+  "earGptossVsRollbackLo": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs RB_cold, 12 tasks",
+  "earGptossVsRollbackHi": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, vs RB_cold, 12 tasks",
+  "earGptossOk": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, correct goals",
+  "earGptossOkLo": "Wilson 95, Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower",
+  "earGptossOkHi": "Wilson 95, Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower",
+  "earGptossRestrictedShare": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, items where the unrestricted pick (all options) is an option this study never ran",
+  "earGptossRestrictedSharePct": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, percent",
+  "earGptossCostRoute": "Gptoss, out of model offline replay of EAR (selector v2 179b8386, params v2 97ecd54a), restricted to FR_warm, SR_warm, RB_cold; 96 items scored, 0 routed to the cost model (not scored); board J per successful goal, paired bootstrap over tasks, positive = EAR lower, items routed to the cost model (not scored)"
+ },
+ "table": {
+  "Mistral": {
+   "FR_warm": {
+    "j": 6110.01928652516,
+    "ok": 62,
+    "n": 64
+   },
+   "SR_warm": {
+    "j": 5216.300585536361,
+    "ok": 54,
+    "n": 64
+   },
+   "RB_cold": {
+    "j": 5451.754497376532,
+    "ok": 55,
+    "n": 64
+   },
+   "EAR": {
+    "j": 4991.2553900875455,
+    "ok": 59,
+    "n": 64
+   }
+  },
+  "Gptoss": {
+   "FR_warm": {
+    "j": 3635.880417040287,
+    "ok": 86,
+    "n": 96
+   },
+   "SR_warm": {
+    "j": 3293.7246224388837,
+    "ok": 73,
+    "n": 96
+   },
+   "RB_cold": {
+    "j": 3533.6710814237667,
+    "ok": 78,
+    "n": 96
+   },
+   "EAR": {
+    "j": 2674.0634309017887,
+    "ok": 87,
+    "n": 96
+   }
+  }
+ }
+}

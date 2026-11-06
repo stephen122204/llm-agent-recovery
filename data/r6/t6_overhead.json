@@ -1,0 +1,75 @@
+{
+ "ctrl_beta": {
+  "decide_ms": {
+   "n": 111,
+   "median": 17.673064,
+   "p90": 20.622037,
+   "p99": 21.440377,
+   "max": 21.78987
+  },
+  "history_ms": {
+   "n": 111,
+   "median": 17.385083,
+   "p90": 20.398719,
+   "p99": 21.167831,
+   "max": 21.468463
+  },
+  "decide_minus_history_ms": {
+   "n": 111,
+   "median": 0.269424,
+   "p90": 0.308546,
+   "p99": 0.524176,
+   "max": 0.638356
+  }
+ },
+ "xstar_rule": {
+  "decide_ms": {
+   "n": 111,
+   "median": 0.053104,
+   "p90": 0.066608,
+   "p99": 0.358656,
+   "max": 0.366869
+  },
+  "history_ms": {
+   "n": 0,
+   "median": null,
+   "p90": null,
+   "p99": null,
+   "max": null
+  },
+  "decide_minus_history_ms": {
+   "n": 0,
+   "median": null,
+   "p90": null,
+   "p99": null,
+   "max": null
+  }
+ },
+ "token_rule": {
+  "decide_ms": {
+   "n": 111,
+   "median": 0.074417,
+   "p90": 0.089457,
+   "p99": 0.376483,
+   "max": 0.380037
+  },
+  "history_ms": {
+   "n": 0,
+   "median": null,
+   "p90": null,
+   "p99": null,
+   "max": null
+  },
+  "decide_minus_history_ms": {
+   "n": 0,
+   "median": null,
+   "p90": null,
+   "p99": null,
+   "max": null
+  }
+ },
+ "macros": {
+  "ctrlDecideMs": "ctrl_beta.decide_ms.median",
+  "ctrlHistoryMs": "ctrl_beta.history_ms.median"
+ }
+}

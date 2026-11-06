@@ -1,0 +1,135 @@
+{
+ "sampRateLimitEarlyResumeVsRestart": {
+  "value": -29.823380207818428,
+  "ci": [
+   -93.97828123488937,
+   -2.5374003886437833
+  ],
+  "tasks": 10,
+  "nan_draws": 0
+ },
+ "sampRateLimitEarlySrSucc": {
+  "value": 0.8333333333333334,
+  "ci": [
+   0.6643529481431982,
+   0.9266356575964831
+  ]
+ },
+ "sampRateLimitEarlyFrSucc": {
+  "value": 0.9666666666666667,
+  "ci": [
+   0.8332924860304112,
+   0.9940915620051425
+  ]
+ },
+ "sampRateLimitLateResumeVsRestart": {
+  "value": 35.661335718368015,
+  "ci": [
+   29.19307218457245,
+   43.10650435558589
+  ],
+  "tasks": 10,
+  "nan_draws": 0
+ },
+ "sampRateLimitLateSrSucc": {
+  "value": 0.9666666666666667,
+  "ci": [
+   0.8332924860304112,
+   0.9940915620051425
+  ]
+ },
+ "sampRateLimitLateFrSucc": {
+  "value": 0.9333333333333333,
+  "ci": [
+   0.7867618227892791,
+   0.9815233646723066
+  ]
+ },
+ "sampToolErrorEarlyResumeVsRestart": {
+  "value": -21.800259056039465,
+  "ci": [
+   -65.98784071877985,
+   2.1904723482261934
+  ],
+  "tasks": 10,
+  "nan_draws": 0
+ },
+ "sampToolErrorEarlySrSucc": {
+  "value": 0.7333333333333333,
+  "ci": [
+   0.5555169795568831,
+   0.8581750444608938
+  ]
+ },
+ "sampToolErrorEarlyFrSucc": {
+  "value": 0.9666666666666667,
+  "ci": [
+   0.8332924860304112,
+   0.9940915620051425
+  ]
+ },
+ "sampToolErrorLateResumeVsRestart": {
+  "value": 29.917378570300176,
+  "ci": [
+   9.523754735025008,
+   40.97826511957425
+  ],
+  "tasks": 10,
+  "nan_draws": 0
+ },
+ "sampToolErrorLateSrSucc": {
+  "value": 0.8666666666666667,
+  "ci": [
+   0.7031831605558306,
+   0.9469043057578189
+  ]
+ },
+ "sampToolErrorLateFrSucc": {
+  "value": 0.9333333333333333,
+  "ci": [
+   0.7867618227892791,
+   0.9815233646723066
+  ]
+ },
+ "sampEarlyResumeVsRestart": {
+  "value": -25.41839529720385,
+  "ci": [
+   -77.12377798031387,
+   -0.1386770991629989
+  ],
+  "tasks": 10,
+  "nan_draws": 0
+ },
+ "sampLateResumeVsRestart": {
+  "value": 32.958181857569734,
+  "ci": [
+   23.406224221524514,
+   41.85238550046653
+  ],
+  "tasks": 10,
+  "nan_draws": 0
+ },
+ "sampSplitHolds": true,
+ "sampSameOutcome": {
+  "value": 88.33333333333333,
+  "ci": [
+   74.16666666666667,
+   96.66666666666667
+  ],
+  "pairs": 240
+ },
+ "sampWinnerMatchesGreedy": 4,
+ "sampCells": 4,
+ "sampNTasks": 10,
+ "sampProvenance": {
+  "data_tag": "frozen_samp",
+  "export": "inputs/frozen_runs/samp/export_samp",
+  "greedy_export": "inputs/frozen_runs/main/export_frozen_main",
+  "study": "raf_samp",
+  "boot": 2000,
+  "seed": 0,
+  "goals": 240,
+  "goals_sha256": "8093793189ad9285c82ec72c3f79012bbcb8ce289ea2d99b7f7a6c59efc285f6",
+  "definition": "ResumeVsRestart = 100 (J_FR_warm - J_SR_warm) / J_FR_warm, energy per achieved goal, seeds pooled as repeats, paired bootstrap by task; SameOutcome = share of seed pairs with the same checker verdict in each (task, class, point, option)"
+ }
+}

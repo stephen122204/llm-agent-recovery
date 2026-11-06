@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "alems/raf/controller_params/1.1.0",
+  "title": "RAF controller parameters (R5 output, R6 input); layout agreed R5 and R6, Oct 16",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["classes"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "params_version": {"type": "string"},
+    "data_tag": {"type": "string"},
+    "platform": {"type": "string"},
+    "model": {"type": "string"},
+    "work_unit": {"const": "calls", "description": "model plus tool calls before the failure"},
+    "provenance": {
+      "type": "object",
+      "properties": {"data_tag": {"type": "string"}, "git": {"type": "string"},
+                     "sha256": {"type": "string"}}
+    },
+    "energy_law": {
+      "type": "object",
+      "description": "e(c) = a + b c + d c^2 per call; analysis only, not used at decision time",
+      "properties": {"a": {"type": "number"}, "b": {"type": "number"},
+                     "d": {"type": "number"}, "ci": {"type": "object"}}
+    },
+    "overhead": {
+      "type": ["object", "null"],
+      "description": "added to E2 for attempt > 2 (R5 6.2); null until E2",
+      "properties": {"o0": {"type": "number"}, "o1": {"type": "number"},
+                     "o2": {"type": "number"}}
+    },
+    "prior_scale": {"type": "number", "description": "cap on alpha + beta of the prior (R5: 12)"},
+    "classes": {
+      "type": "object",
+      "description": "observable class (failure record cls, persistent_ removed) or _default",
+      "propertyNames": {"not": {"pattern": "^persistent_|^silent_tool_output$|^wrong_model_step$"}},
+      "additionalProperties": {"$ref": "#/$defs/class"}
+    }
+  },
+  "$defs": {
+    "class": {
+      "type": "object",
+      "properties": {
+        "_x_star_calls": {"type": ["number", "null"]},
+        "_x_star_calls_ci": {"type": ["array", "object", "null"]},
+        "_x_star_calls_model": {"type": ["number", "null"]},
+        "_x_star_joules": {"type": ["number", "null"]},
+        "_budget_j": {"type": ["number", "null"], "description": "joules per achieved goal"},
+        "options": {
+          "type": "object",
+          "propertyNames": {"pattern": "^(FR|SR|RB|SG)_(warm|cold)$"},
+          "additionalProperties": {"$ref": "#/$defs/option"}
+        }
+      }
+    },
+    "option": {
+      "type": "object",
+      "required": ["alpha", "beta"],
+      "properties": {
+        "alpha": {"type": "number", "exclusiveMinimum": 0},
+        "beta": {"type": "number", "exclusiveMinimum": 0},
+        "alpha_raw": {"type": "number"},
+        "beta_raw": {"type": "number"},
+        "e2_a": {"type": ["number", "null"]},
+        "e2_b": {"type": ["number", "null"]},
+        "e2_g": {"type": ["number", "null"]},
+        "e2_h": {"type": ["number", "null"]},
+        "p_repeat_after_fail": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      }
+    }
+  }
+}

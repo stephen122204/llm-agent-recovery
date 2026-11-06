@@ -1,0 +1,186 @@
+{
+ "label": "ONLINE LEARNING CONTROLLER (E3), R6 diagnosis, class split",
+ "method": "same as t3b_point_split (functions copied unchanged), per class and point; immutable read",
+ "null_success_goals": 0,
+ "ctrlVsTokenEarlyToolError": {
+  "value": 24.9,
+  "ci": [
+   13.3,
+   42.9
+  ],
+  "unit": "percent",
+  "significant": true,
+  "blocks": 28,
+  "tasks": 28,
+  "bootstrap_valid": 5000,
+  "arms": {
+   "ctrl_beta": {
+    "achieved": {
+     "k": 23,
+     "n": 28
+    },
+    "sum_board_j": 34285.45632936475,
+    "board_j_per_achieved": 1490.6720143202067,
+    "options": {
+     "FR_warm": 23,
+     "FR_cold": 5
+    }
+   },
+   "token_rule": {
+    "achieved": {
+     "k": 25,
+     "n": 28
+    },
+    "sum_board_j": 29838.811565582888,
+    "board_j_per_achieved": 1193.5524626233155,
+    "options": {
+     "RB_warm": 28
+    }
+   }
+  }
+ },
+ "ctrlVsTokenEarlyJsonParse": {
+  "value": 13.5,
+  "ci": [
+   -4.2,
+   35.2
+  ],
+  "unit": "percent",
+  "significant": false,
+  "blocks": 28,
+  "tasks": 28,
+  "bootstrap_valid": 5000,
+  "arms": {
+   "ctrl_beta": {
+    "achieved": {
+     "k": 25,
+     "n": 28
+    },
+    "sum_board_j": 35613.11707548275,
+    "board_j_per_achieved": 1424.5246830193098,
+    "options": {
+     "FR_warm": 28
+    }
+   },
+   "token_rule": {
+    "achieved": {
+     "k": 24,
+     "n": 28
+    },
+    "sum_board_j": 30117.60800701532,
+    "board_j_per_achieved": 1254.9003336256383,
+    "options": {
+     "RB_warm": 28
+    }
+   }
+  }
+ },
+ "ctrlVsTokenLateToolError": {
+  "value": 24.6,
+  "ci": [
+   3.9,
+   60.0
+  ],
+  "unit": "percent",
+  "significant": true,
+  "blocks": 27,
+  "tasks": 27,
+  "bootstrap_valid": 5000,
+  "arms": {
+   "ctrl_beta": {
+    "achieved": {
+     "k": 21,
+     "n": 27
+    },
+    "sum_board_j": 34444.45312667449,
+    "board_j_per_achieved": 1640.2120536511661,
+    "options": {
+     "SR_cold": 25,
+     "FR_warm": 1,
+     "SR_warm": 1
+    }
+   },
+   "token_rule": {
+    "achieved": {
+     "k": 26,
+     "n": 27
+    },
+    "sum_board_j": 34222.19648088212,
+    "board_j_per_achieved": 1316.238326187774,
+    "options": {
+     "RB_warm": 26,
+     "SR_warm": 1
+    }
+   }
+  }
+ },
+ "ctrlVsTokenLateJsonParse": {
+  "value": -7.0,
+  "ci": [
+   -15.2,
+   -1.6
+  ],
+  "unit": "percent",
+  "significant": true,
+  "blocks": 28,
+  "tasks": 28,
+  "bootstrap_valid": 5000,
+  "arms": {
+   "ctrl_beta": {
+    "achieved": {
+     "k": 26,
+     "n": 28
+    },
+    "sum_board_j": 34232.23667985781,
+    "board_j_per_achieved": 1316.6244876868388,
+    "options": {
+     "SG_warm": 28
+    }
+   },
+   "token_rule": {
+    "achieved": {
+     "k": 25,
+     "n": 28
+    },
+    "sum_board_j": 35399.37184068117,
+    "board_j_per_achieved": 1415.9748736272468,
+    "options": {
+     "RB_warm": 16,
+     "SR_warm": 12
+    }
+   }
+  }
+ },
+ "check_vs_t3b": {
+  "early": {
+   "recomputed": [
+    19.0,
+    6.6,
+    35.0
+   ],
+   "t3b": [
+    19.0,
+    6.6,
+    35.0
+   ],
+   "match": true
+  },
+  "late": {
+   "recomputed": [
+    7.0,
+    -2.5,
+    19.1
+   ],
+   "t3b": [
+    7.0,
+    -2.5,
+    19.1
+   ],
+   "match": true
+  }
+ },
+ "hypothesis_xstar_gate": {
+  "rule": "holds if early gap significant in tool_error and not in json_parse",
+  "holds": true
+ }
+}

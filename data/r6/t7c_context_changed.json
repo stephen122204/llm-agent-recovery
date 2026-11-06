@@ -1,0 +1,13 @@
+{
+ "ctrlContextChangedDecisions": {
+  "k": 44,
+  "n": 111,
+  "value": 39.6,
+  "unit": "percent",
+  "label": "replay diagnostic",
+  "meaning": "ctrl_beta decisions that would choose a different option if the energy law used the export token counts instead of zero; all at decision_attempt 2; later history effects not modelled",
+  "source": "R7 parity_e3_exporttokens.json",
+  "source_sha256": "24c8dd7dd7e62bd75969717b4d9cc490d72e81e207189c4612cc6892ac38b54d",
+  "parity_of_record": "R7 parity_e3.json sha256 6eff3c56984adc9c1eaaea67e008f89d95e9d877d83af11d9b81e64b7f920936: e_pred equals the energy law with no token counts, 111 of 111"
+ }
+}

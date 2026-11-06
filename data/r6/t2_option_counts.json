@@ -1,0 +1,152 @@
+{
+ "note": "fixed arms run their own option; deciding arms: option chosen before attempt 2",
+ "by_arm_point": {
+  "ctrl_beta": {
+   "early": {
+    "FR_warm": 51,
+    "FR_cold": 5
+   },
+   "late": {
+    "SR_cold": 25,
+    "SG_warm": 28,
+    "SR_warm": 1,
+    "FR_warm": 1
+   }
+  },
+  "FR_warm": {
+   "early": {
+    "FR_warm": 56
+   },
+   "late": {
+    "FR_warm": 55
+   }
+  },
+  "xstar_rule": {
+   "early": {
+    "FR_warm": 56
+   },
+   "late": {
+    "SR_warm": 55
+   }
+  },
+  "SR_warm": {
+   "early": {
+    "SR_warm": 56
+   },
+   "late": {
+    "SR_warm": 55
+   }
+  },
+  "token_rule": {
+   "early": {
+    "RB_warm": 56
+   },
+   "late": {
+    "RB_warm": 42,
+    "SR_warm": 13
+   }
+  },
+  "RB_cold": {
+   "early": {
+    "RB_cold": 56
+   },
+   "late": {
+    "RB_cold": 55
+   }
+  }
+ },
+ "by_arm_class_point": {
+  "ctrl_beta": {
+   "tool_error|early": {
+    "FR_warm": 23,
+    "FR_cold": 5
+   },
+   "json_parse|early": {
+    "FR_warm": 28
+   },
+   "tool_error|late": {
+    "SR_cold": 25,
+    "SR_warm": 1,
+    "FR_warm": 1
+   },
+   "json_parse|late": {
+    "SG_warm": 28
+   }
+  },
+  "FR_warm": {
+   "tool_error|early": {
+    "FR_warm": 28
+   },
+   "json_parse|early": {
+    "FR_warm": 28
+   },
+   "tool_error|late": {
+    "FR_warm": 27
+   },
+   "json_parse|late": {
+    "FR_warm": 28
+   }
+  },
+  "xstar_rule": {
+   "tool_error|early": {
+    "FR_warm": 28
+   },
+   "json_parse|early": {
+    "FR_warm": 28
+   },
+   "tool_error|late": {
+    "SR_warm": 27
+   },
+   "json_parse|late": {
+    "SR_warm": 28
+   }
+  },
+  "SR_warm": {
+   "tool_error|early": {
+    "SR_warm": 28
+   },
+   "json_parse|early": {
+    "SR_warm": 28
+   },
+   "tool_error|late": {
+    "SR_warm": 27
+   },
+   "json_parse|late": {
+    "SR_warm": 28
+   }
+  },
+  "token_rule": {
+   "tool_error|early": {
+    "RB_warm": 28
+   },
+   "json_parse|early": {
+    "RB_warm": 28
+   },
+   "tool_error|late": {
+    "RB_warm": 26,
+    "SR_warm": 1
+   },
+   "json_parse|late": {
+    "SR_warm": 12,
+    "RB_warm": 16
+   }
+  },
+  "RB_cold": {
+   "tool_error|early": {
+    "RB_cold": 28
+   },
+   "json_parse|early": {
+    "RB_cold": 28
+   },
+   "tool_error|late": {
+    "RB_cold": 27
+   },
+   "json_parse|late": {
+    "RB_cold": 28
+   }
+  }
+ },
+ "macros": {
+  "ctrlOptionCounts": "by_arm_point.ctrl_beta"
+ }
+}

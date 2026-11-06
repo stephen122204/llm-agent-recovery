@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+"""
+Simple ConfigLoader for testing
+"""
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, Optional
+from core.models_loader import get_backward_compat, get_model, list_providers, list_models
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+class ConfigDict(dict):
+    """A dictionary that also allows attribute access.
+
+    This class enables both:
+        dict-style: config['database']['path']
+        object-style: config.database.path
+
+    All nested dictionaries are automatically converted to ConfigDict.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.__dict__ = self
+
+    def __getattr__(self, name):
+        """Allow attribute access to dictionary keys."""
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"'ConfigDict' object has no attribute '{name}'")
+
+
+class ConfigLoader:
+    """Simple config loader for testing LLM setup."""
+
+    def __init__(self, config_dir: Optional[str] = None):
+        """Initialize with config directory."""
+        # Set configuration directory
+        if config_dir is None:
+            self.config_dir = Path(__file__).parent.parent / "config"
+            # Use sandbox config/ if running inside a sandbox (design 7.12 layer 4).
+            import os
+            sandbox_dir = None
+            sandbox_env = os.environ.get("ALEMS_SANDBOX")
+            if sandbox_env:
+                sandbox_dir = Path(sandbox_env)
+            else:
+                p = Path.cwd()
+                for _ in range(8):
+                    if (p / "alems-sandbox.yaml").exists():
+                        sandbox_dir = p
+                        break
+                    parent = p.parent
+                    if parent == p:
+                        break
+                    p = parent
+            if sandbox_dir is not None and (sandbox_dir / "config").exists():
+                self.config_dir = sandbox_dir / "config"
+        else:
+            self.config_dir = Path(config_dir)
+
+        logger.info("config directory %s", self.config_dir)
+
+        # Load models config
+        self._models_config = self._load_json("models.json")
+        logger.debug("models config keys: %s", list(self._models_config.keys()) if self._models_config else None)
+
+        # Load hardware config via accessor (design 7.13).
+        # resolve_hw_config() checks machine path first, repo fallback second.
+        # Never loads from a sandbox directory.
+        try:
+            from core.storage.resolver import resolve_hw_config
+            self._hardware_config = resolve_hw_config()
+        except Exception as _e:
+            logger.warning("resolve_hw_config failed, falling back to direct load: %s", _e)
+            try:
+                from core.observability import errors as _obs_errors
+                _obs_errors.capture(_e, code="ALEMS-CFG-0009", component=__name__)
+            except Exception as _ce:  # noqa: BLE001  capture never breaks config load (5.2a)
+                logger.debug("error capture unavailable: %s", _ce)
+            self._hardware_config = self._load_json("hw_config.json")
+        logger.debug("hardware config keys: %s", list(self._hardware_config.keys()) if self._hardware_config else None)
+
+        # ====================================================================
+        # NEW: Load grid intensity config for sustainability calculator
+        # ====================================================================
+        self._grid_intensity = self._load_json("grid_intensity_2026.json")
+        self._source_alemsrc()             # load machine-specific env vars
+        if self._grid_intensity:
+            country_count = len(
+                [k for k in self._grid_intensity.keys() if k != "metadata"]
+            )
+            logger.info("grid intensity data for %d countries", country_count)
+            logger.debug("grid data keys: %s", list(self._grid_intensity.keys()))
+        else:
+            logger.warning("no grid intensity data loaded")
+
+    def _load_json(self, filename: str) -> Dict[str, Any]:
+        """Load JSON file from config directory."""
+        filepath = self.config_dir / filename
+        logger.debug("loading %s", filepath)
+
+        if not filepath.exists():
+            logger.info("config file not found: %s", filepath)
+            return {}
+
+        try:
+            with open(filepath, "r") as f:
+                data = json.load(f)
+            logger.info("loaded %s", filename)
+            return data
+        except Exception as e:
+            logger.warning("error loading %s: %s", filename, e)
+            try:
+                # JSON syntax errors classify as ALEMS-CFG-0003 (component rule)
+                from core.observability import errors as _obs_errors
+                _obs_errors.capture(e, component=__name__)
+            except Exception as _ce:  # noqa: BLE001  capture never breaks config load (5.2a)
+                logger.debug("error capture unavailable: %s", _ce)
+            return {}
+    def _source_alemsrc(self) -> None:
+        """
+        Source ~/.alemsrc if it exists — Ab Initio inspired pattern.
+        Sets machine-specific env vars (ALEMS_DATA_ROOT, API keys) without
+        requiring shell sourcing. Uses setdefault so shell env always wins.
+        """
+        import os
+        alemsrc = os.path.expanduser("~/.alemsrc")
+        if not os.path.exists(alemsrc):
+            return                         # no rc file — silent, not an error
+        with open(alemsrc) as f:
+            for line in f:
+                line = line.strip()
+                if not line.startswith("export "):
+                    continue               # skip comments and blank lines
+                key, _, val = line[7:].partition("=")
+                # setdefault: shell environment always takes priority over rc file
+                os.environ.setdefault(key.strip(), val.strip())
+
+    def get_db_path(self) -> str:
+        """
+        Resolve the correct SQLite DB path for this machine.
+        Delegates to path_loader.get_alems_db_path() which is the single
+        source of truth. Reads .alems-env (project-level) then ~/.alemsrc
+        (machine-level) with full user+project isolation for non-prod envs.
+        """
+        from scripts.tools.path_loader import get_alems_db_path
+        return get_alems_db_path()
+
+    def get_hardware_config(self) -> Dict[str, Any]:
+        """
+        Get the hardware configuration.
+
+        Returns:
+            Dictionary containing hardware configuration with keys:
+            - rapl: RAPL paths and domains
+            - thermal: Thermal zone paths
+            - msr: MSR device information
+            - cpufreq: CPU frequency paths
+            - cpu: CPU core information
+            - turbostat: Turbostat column mappings
+        """
+        if self._hardware_config is None:
+            logger.warning("Hardware config not loaded, returning empty dict")
+            return {}
+
+        # Return a copy of the dictionary
+        return self._hardware_config.copy()
+
+    def get_model_config(self, mode: str, workflow: str) -> Optional[Dict[str, Any]]:
+        """
+        Get model configuration for a specific mode and workflow.
+
+        Args:
+            mode: "local" or "cloud"
+            workflow: "linear" or "agentic"
+
+        Returns:
+            Dictionary with model config or None if not found.
+        """
+        if self._models_config is None:
+            logger.warning("models config not loaded")
+            return None
+
+        # v2: cloud/local keys live in models.yaml _backward_compat block
+        bc = get_backward_compat(mode, workflow)
+        if bc:
+            return bc
+        # fallback to raw JSON for any legacy keys still in file
+        mode_config = self._models_config.get(mode, {})
+        if not mode_config:
+            logger.warning("mode %s not found in config", mode)
+            return None
+
+        workflow_config = mode_config.get(workflow)
+        if not workflow_config:
+            logger.warning("workflow %s not found in mode %s", workflow, mode)
+            return None
+
+        return workflow_config.copy()
+    def get_model_config_v2(self, provider: str, model_id: str):
+        """
+        Get flat merged config for provider + model_id from models.yaml.
+ 
+        Args:
+            provider: e.g. 'ollama_remote', 'groq', 'llama_cpp'
+            model_id: e.g. 'qwen2.5-coder:14b'
+ 
+        Returns:
+            Flat merged dict or None if not found.
+        """
+        return get_model(provider, model_id)
+ 
+    def list_providers(self, task=None):
+        """
+        List all providers from models.yaml, optionally filtered by task.
+ 
+        Args:
+            task: e.g. 'text-generation', None = all
+ 
+        Returns:
+            Dict provider_id -> provider block
+        """
+        return list_providers(task=task)
+ 
+    def list_models(self, provider: str):
+        """
+        List all available models for a provider.
+ 
+        Args:
+            provider: provider key string
+ 
+        Returns:
+            List of expanded model dicts
+        """
+        return list_models(provider)
+
+   
+    # ========================================================================
+    # NEW METHOD: Get grid intensity data for sustainability calculator
+    # ========================================================================
+    def get_grid_intensity_data(self) -> Dict[str, Any]:
+        """
+        Load grid intensity data from JSON file.
+
+        Returns:
+            Dictionary with country codes as keys and grid factors as values,
+            or empty dict if not available.
+        """
+        if self._grid_intensity is None:
+            logger.warning("Grid intensity data not loaded, returning empty dict")
+            return {}
+
+        # Return a copy of the dictionary
+        return self._grid_intensity.copy()
+
+    # ========================================================================
+    # NEW METHOD: Get grid factors for a specific country
+    # ========================================================================
+    def get_country_grid_factors(self, country_code: str) -> Optional[Dict[str, Any]]:
+        """
+        Get grid factors for a specific country.
+
+        Args:
+            country_code: ISO country code (e.g., "US", "IN", "FR")
+
+        Returns:
+            Dictionary with grid factors for the country, or None if not found.
+        """
+        if not self._grid_intensity:
+            return None
+
+        # Handle case-insensitive lookup
+        country_code = country_code.upper()
+
+        # Direct lookup
+        if country_code in self._grid_intensity:
+            return self._grid_intensity[country_code].copy()
+
+        # Try to find in keys (some files might have lowercase)
+        for code, data in self._grid_intensity.items():
+            if code.upper() == country_code:
+                return data.copy()
+
+        logger.debug(f"Country {country_code} not found in grid intensity data")
+        return None
+
+    # ========================================================================
+    # NEW METHOD: Get country metrics for ESI calculation
+    # ========================================================================
+    def get_country_metrics(self, country_code: str) -> Optional[Dict[str, Any]]:
+        """
+        Get country metrics (population, GDP, household energy) for a specific country.
+
+        Args:
+            country_code: ISO country code (e.g., "US", "IN", "FR")
+
+        Returns:
+            Dictionary with country metrics or None if not found.
+        """
+        try:
+            # Try to load country_metrics.yaml
+            import yaml
+
+            metrics_path = self.config_dir / "country_metrics.yaml"
+
+            if not metrics_path.exists():
+                logger.warning(f"Country metrics file not found: {metrics_path}")
+                return None
+
+            with open(metrics_path, "r") as f:
+                metrics_data = yaml.safe_load(f)
+
+            countries = metrics_data.get("countries", {})
+
+            # Handle case-insensitive lookup
+            country_code = country_code.upper()
+
+            # Direct lookup
+            if country_code in countries:
+                return countries[country_code].copy()
+
+            # Try to find in keys
+            for code, data in countries.items():
+                if code.upper() == country_code:
+                    return data.copy()
+
+            logger.debug(f"Country {country_code} not found in country metrics")
+            return None
+
+        except ImportError:
+            logger.error("PyYAML not installed. Run: pip install pyyaml")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to load country metrics: {e}")
+            try:
+                # YAML syntax errors classify as ALEMS-CFG-0002 (class rule)
+                from core.observability import errors as _obs_errors
+                _obs_errors.capture(e, component=__name__)
+            except Exception as _ce:  # noqa: BLE001  capture never breaks config load (5.2a)
+                logger.debug("error capture unavailable: %s", _ce)
+            return None
+
+    # ========================================================================
+    # NEW METHOD: List all available countries in grid data
+    # ========================================================================
+    def list_available_countries(self) -> list:
+        """Get list of all country codes available in grid intensity data."""
+        if not self._grid_intensity:
+            return []
+
+        return [k for k in self._grid_intensity.keys() if k != "metadata"]
+
+    def get_settings(self) -> ConfigDict:
+        """
+        Load settings from app_settings.yaml.
+
+        Returns:
+            ConfigDict that works with both:
+            - Dict-style: settings['database']['path']
+            - Object-style: settings.database.path
+        """
+        settings_path = self.config_dir / "app_settings.yaml"
+
+        if not settings_path.exists():
+            logger.info("settings file not found: %s", settings_path)
+            return ConfigDict()
+
+        try:
+            import yaml
+
+            with open(settings_path, "r") as f:
+                data = yaml.safe_load(f)
+
+            # Merge sandbox config/overrides.yaml on top (design 7.12 layer 4)
+            merged = data if data else {}
+            sandbox_overrides = self._load_sandbox_overrides()
+            if sandbox_overrides:
+                merged = self._deep_merge(merged, sandbox_overrides)
+            # Recursively convert nested dicts to ConfigDict
+            return self._to_config_dict(merged)
+
+        except ImportError:
+            logger.warning("PyYAML not installed (pip install pyyaml)")
+            return ConfigDict()
+        except Exception as e:
+            print(f"Failed to load settings: {e}")
+            return ConfigDict()
+
+    def _load_sandbox_overrides(self):
+        # type: () -> dict
+        """Find and load sandbox config/overrides.yaml via ALEMS_SANDBOX or cwd walk-up."""
+        import os
+        import yaml
+        sandbox_dir = None
+        sandbox_env = os.environ.get("ALEMS_SANDBOX")
+        if sandbox_env:
+            sandbox_dir = Path(sandbox_env)
+        else:
+            p = Path.cwd()
+            for _ in range(8):
+                if (p / "alems-sandbox.yaml").exists():
+                    sandbox_dir = p
+                    break
+                parent = p.parent
+                if parent == p:
+                    break
+                p = parent
+        if sandbox_dir is None:
+            return {}
+        overrides_path = sandbox_dir / "config" / "overrides.yaml"
+        if not overrides_path.exists():
+            return {}
+        try:
+            with open(overrides_path) as f:
+                data = yaml.safe_load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning("sandbox overrides load failed: %s", e)
+            return {}
+
+    def _deep_merge(self, base, override):
+        # type: (dict, dict) -> dict
+        """Recursively merge override onto base. Override wins on conflict."""
+        result = dict(base)
+        for key, val in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+                result[key] = self._deep_merge(result[key], val)
+            else:
+                result[key] = val
+        return result
+
+    def _to_config_dict(self, data):
+        """Recursively convert dict to ConfigDict."""
+        if isinstance(data, dict):
+            return ConfigDict({k: self._to_config_dict(v) for k, v in data.items()})
+        elif isinstance(data, list):
+            return [self._to_config_dict(item) for item in data]
+        else:
+            return data
+
+    def get_db_config(self) -> Dict[str, Any]:
+        """
+        Get database configuration from app_settings.yaml.
+
+        Returns:
+            Dictionary with database configuration including:
+            - engine: 'sqlite' or 'postgresql'
+            - engine-specific config under 'sqlite' or 'postgresql' keys
+            - Common settings (backup_enabled, etc.)
+        """
+        settings = self.get_settings()
+
+        # Handle both object and dict access patterns
+        if hasattr(settings, "database"):
+            # Object-style access (SimpleNamespace)
+            db_config_obj = settings.database
+
+            # Convert SimpleNamespace to dict
+            if hasattr(db_config_obj, "__dict__"):
+                db_config = db_config_obj.__dict__
+            else:
+                db_config = {}
+                for key in dir(db_config_obj):
+                    if not key.startswith("_"):
+                        value = getattr(db_config_obj, key)
+                        if not callable(value):
+                            # If value is also SimpleNamespace, convert it
+                            if hasattr(value, "__dict__"):
+                                db_config[key] = value.__dict__
+                            else:
+                                db_config[key] = value
+        else:
+            # Dict-style access
+            db_config = settings.get("database", {})
+
+        # Ensure engine is set
+        if "engine" not in db_config:
+            db_config["engine"] = "sqlite"
+            logger.info("no database engine specified; sqlite used")
+
+        # Set defaults for missing values
+        if db_config["engine"] == "sqlite":
+            # Handle both dict and SimpleNamespace for sqlite config
+            sqlite_config = db_config.get("sqlite", {})
+            if hasattr(sqlite_config, "__dict__"):
+                # Convert SimpleNamespace to dict
+                sqlite_config = sqlite_config.__dict__
+
+            # Now ensure it's a dict and set defaults
+            if not isinstance(sqlite_config, dict):
+                sqlite_config = {}
+
+            # Use get_db_path() for machine-aware path resolution
+            # Overrides yaml default on machines with ALEMS_DATA_ROOT set
+            sqlite_config["path"] = self.get_db_path()
+            sqlite_config.setdefault("journal_mode", "WAL")
+            sqlite_config.setdefault("timeout", 30)
+            db_config["sqlite"] = sqlite_config
+
+        else:  # postgresql
+            # Handle both dict and SimpleNamespace for postgresql config
+            pg_config = db_config.get("postgresql", {})
+            if hasattr(pg_config, "__dict__"):
+                pg_config = pg_config.__dict__
+
+            # Now ensure it's a dict and set defaults
+            if not isinstance(pg_config, dict):
+                pg_config = {}
+
+            pg_config.setdefault("host", "localhost")
+            pg_config.setdefault("port", 5432)
+            pg_config.setdefault("database", "alems")
+            pg_config.setdefault("user", "alems_user")
+            pg_config.setdefault("password", "${DB_PASSWORD}")
+            pg_config.setdefault("pool_size", 10)
+            pg_config.setdefault("pool_timeout", 30)
+            db_config["postgresql"] = pg_config
+
+        # Common settings (ensure dict)
+        if not isinstance(db_config, dict):
+            db_config = {}
+
+        db_config.setdefault("backup_enabled", True)
+        db_config.setdefault("backup_interval_hours", 24)
+
+        return db_config
+
+    def sync_task_categories(self, db_connection):
+        """Sync task categories from YAML to database using TaskLoader"""
+        try:
+            # Import here to avoid circular imports
+            from core.utils.task_loader import load_tasks
+
+            # Load tasks using existing task loader
+            tasks = load_tasks()
+
+            if not tasks:
+                logger.warning("no tasks loaded from YAML")
+                return
+
+            cursor = db_connection.cursor()
+
+            # Clear existing
+            cursor.execute("DELETE FROM task_categories")
+
+            # Insert all tasks with categories
+            count = 0
+            for task in tasks:
+                if "id" in task and "category" in task:
+                    cursor.execute(
+                        "INSERT INTO task_categories (task_id, category) VALUES (?, ?)",
+                        (task["id"], task["category"]),
+                    )
+                    count += 1
+
+            # Add fallback for custom queries
+            cursor.execute(
+                "INSERT OR IGNORE INTO task_categories (task_id, category) VALUES (?, ?)",
+                ("custom_query", "custom"),
+            )
+
+            db_connection.commit()
+            logger.info("synced %d task categories from YAML", count)
+
+            # Optional: Show summary
+            cursor.execute("""
+                SELECT category, COUNT(*) FROM task_categories 
+                GROUP BY category ORDER BY COUNT(*) DESC
+            """)
+            summary = cursor.fetchall()
+            if summary:
+                logger.debug("task categories: %s", dict(summary))
+
+        except Exception as e:
+            logger.warning("error syncing task categories: %s", e, exc_info=True)

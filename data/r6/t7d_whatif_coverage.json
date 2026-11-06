@@ -1,0 +1,328 @@
+{
+ "covered": 29,
+ "total": 44,
+ "threshold_for_appendix": 35,
+ "appendix_eligible": false,
+ "uncovered_by_new_option": {
+  "FR_cold": 6,
+  "SG_warm": 2,
+  "SG_cold": 3,
+  "SR_cold": 4
+ },
+ "covered_by_arm": {
+  "SR_warm": 17,
+  "token_rule": 4,
+  "RB_cold": 8
+ },
+ "rows": [
+  {
+   "goal_id": 3285,
+   "item": "bfcl_multi_turn_base_124|json_parse|early",
+   "logged": "FR_warm",
+   "with_tokens": "FR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3296,
+   "item": "bfcl_multi_turn_base_27|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SG_warm",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3301,
+   "item": "bfcl_multi_turn_base_186|json_parse|early",
+   "logged": "FR_warm",
+   "with_tokens": "FR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3309,
+   "item": "bfcl_multi_turn_base_68|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3322,
+   "item": "bfcl_multi_turn_base_128|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SG_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3364,
+   "item": "bfcl_multi_turn_base_77|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "RB_warm",
+   "measured_by": "token_rule"
+  },
+  {
+   "goal_id": 3374,
+   "item": "bfcl_multi_turn_base_126|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "RB_cold",
+   "measured_by": "RB_cold"
+  },
+  {
+   "goal_id": 3393,
+   "item": "bfcl_multi_turn_base_116|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3404,
+   "item": "bfcl_multi_turn_base_146|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SG_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3406,
+   "item": "bfcl_multi_turn_base_186|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3416,
+   "item": "bfcl_multi_turn_base_156|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3427,
+   "item": "bfcl_multi_turn_base_156|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SG_warm",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3461,
+   "item": "bfcl_multi_turn_base_128|json_parse|early",
+   "logged": "FR_warm",
+   "with_tokens": "FR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3490,
+   "item": "bfcl_multi_turn_base_136|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3501,
+   "item": "bfcl_multi_turn_base_107|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3507,
+   "item": "bfcl_multi_turn_base_107|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3517,
+   "item": "bfcl_multi_turn_base_67|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3520,
+   "item": "bfcl_multi_turn_base_165|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3530,
+   "item": "bfcl_multi_turn_base_136|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "RB_cold",
+   "measured_by": "RB_cold"
+  },
+  {
+   "goal_id": 3555,
+   "item": "bfcl_multi_turn_base_27|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3574,
+   "item": "bfcl_multi_turn_base_109|tool_error|early",
+   "logged": "FR_warm",
+   "with_tokens": "FR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3602,
+   "item": "bfcl_multi_turn_base_191|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SG_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3624,
+   "item": "bfcl_multi_turn_base_96|tool_error|late",
+   "logged": "SR_warm",
+   "with_tokens": "RB_cold",
+   "measured_by": "RB_cold"
+  },
+  {
+   "goal_id": 3649,
+   "item": "bfcl_multi_turn_base_115|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "RB_cold",
+   "measured_by": "RB_cold"
+  },
+  {
+   "goal_id": 3654,
+   "item": "bfcl_multi_turn_base_117|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3668,
+   "item": "bfcl_multi_turn_base_124|tool_error|late",
+   "logged": "FR_warm",
+   "with_tokens": "RB_cold",
+   "measured_by": "RB_cold"
+  },
+  {
+   "goal_id": 3684,
+   "item": "bfcl_multi_turn_base_83|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3698,
+   "item": "bfcl_multi_turn_base_116|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3706,
+   "item": "bfcl_multi_turn_base_192|json_parse|early",
+   "logged": "FR_warm",
+   "with_tokens": "FR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3715,
+   "item": "bfcl_multi_turn_base_109|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "RB_warm",
+   "measured_by": "token_rule"
+  },
+  {
+   "goal_id": 3747,
+   "item": "bfcl_multi_turn_base_67|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3756,
+   "item": "bfcl_multi_turn_base_111|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "RB_cold",
+   "measured_by": "RB_cold"
+  },
+  {
+   "goal_id": 3764,
+   "item": "bfcl_multi_turn_base_165|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3780,
+   "item": "bfcl_multi_turn_base_142|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "RB_cold",
+   "measured_by": "RB_cold"
+  },
+  {
+   "goal_id": 3801,
+   "item": "bfcl_multi_turn_base_79|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3827,
+   "item": "bfcl_multi_turn_base_95|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3837,
+   "item": "bfcl_multi_turn_base_84|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "RB_warm",
+   "measured_by": "token_rule"
+  },
+  {
+   "goal_id": 3848,
+   "item": "bfcl_multi_turn_base_124|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "RB_cold",
+   "measured_by": "RB_cold"
+  },
+  {
+   "goal_id": 3880,
+   "item": "bfcl_multi_turn_base_186|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3914,
+   "item": "bfcl_multi_turn_base_95|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  },
+  {
+   "goal_id": 3919,
+   "item": "bfcl_multi_turn_base_109|json_parse|late",
+   "logged": "SG_warm",
+   "with_tokens": "SR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3938,
+   "item": "bfcl_multi_turn_base_77|json_parse|early",
+   "logged": "FR_warm",
+   "with_tokens": "FR_cold",
+   "measured_by": null
+  },
+  {
+   "goal_id": 3945,
+   "item": "bfcl_multi_turn_base_192|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "RB_warm",
+   "measured_by": "token_rule"
+  },
+  {
+   "goal_id": 3947,
+   "item": "bfcl_multi_turn_base_53|tool_error|late",
+   "logged": "SR_cold",
+   "with_tokens": "SR_warm",
+   "measured_by": "SR_warm"
+  }
+ ],
+ "label": "what-if coverage only, no outcome computed"
+}

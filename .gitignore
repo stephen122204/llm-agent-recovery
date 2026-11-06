@@ -1,0 +1,24 @@
+specs/
+local-archive/
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+output/
+# Manuscript sources and review artifacts stay outside the code repository.
+tex/
+overleaf/
+*.tex
+*.bib
+*.aux
+*.log
+*.fdb_latexmk
+*.fls
+
+inputs/
+*.sqlite
+*.db
+.env
+*.egg-info/
+earctl/build/
+.pytest_cache/

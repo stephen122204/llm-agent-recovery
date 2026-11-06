@@ -1,0 +1,389 @@
+{
+ "sweepQwenUncachedLinA": {
+  "value": -57.449995250106234,
+  "ci": [
+   -64.67168132951744,
+   -51.4719954871832
+  ]
+ },
+ "sweepQwenUncachedLinB": {
+  "value": 0.039250692252428644,
+  "ci": [
+   0.03851927973496844,
+   0.040159126639236195
+  ]
+ },
+ "sweepQwenUncachedQuadA": {
+  "value": 66.49914503115794,
+  "ci": [
+   58.817914138720084,
+   74.79832864483612
+  ]
+ },
+ "sweepQwenUncachedQuadB": {
+  "value": 0.012797064131023966,
+  "ci": [
+   0.010464666196277495,
+   0.014921702665864513
+  ]
+ },
+ "sweepQwenUncachedQuadD": {
+  "value": 7.80775589573768e-07,
+  "ci": [
+   7.008439781760377e-07,
+   8.735779998038057e-07
+  ]
+ },
+ "sweepQwenUncachedQuadSupported": true,
+ "sweepQwenUncachedSlopeLow": {
+  "value": 0.02295102670574143,
+  "ci": [
+   0.022052050641869794,
+   0.023823831651694948
+  ],
+  "sizes": [
+   2048,
+   8192
+  ]
+ },
+ "sweepQwenUncachedSlopeHigh": {
+  "value": 0.05118610181917553,
+  "ci": [
+   0.049387985821279894,
+   0.05336767975090543
+  ],
+  "sizes": [
+   16384,
+   32672
+  ]
+ },
+ "sweepQwenUncachedNCalls": 60,
+ "sweepQwenUncachedCtxMax": 32672,
+ "sweepQwenUncachedCtxPNinetyFive": 32672,
+ "sweepQwenCachedLinA": {
+  "value": 60.536695935007266,
+  "ci": [
+   58.99645846306195,
+   62.228331309980916
+  ]
+ },
+ "sweepQwenCachedLinB": {
+  "value": 0.0023181636342859274,
+  "ci": [
+   0.0021879916146707624,
+   0.002427149830897291
+  ]
+ },
+ "sweepQwenCachedQuadA": {
+  "value": 58.77047657953449,
+  "ci": [
+   56.517166756588814,
+   60.98544472357496
+  ]
+ },
+ "sweepQwenCachedQuadB": {
+  "value": 0.0026951159060911016,
+  "ci": [
+   0.002295161101664731,
+   0.0031010139603113306
+  ]
+ },
+ "sweepQwenCachedQuadD": {
+  "value": -1.1125700070839675e-08,
+  "ci": [
+   -2.3786117075095208e-08,
+   5.694698346950742e-10
+  ]
+ },
+ "sweepQwenCachedQuadSupported": false,
+ "sweepQwenCachedSlopeLow": {
+  "value": 0.002491179046403097,
+  "ci": [
+   0.0020229832258647756,
+   0.0029378836549825605
+  ],
+  "sizes": [
+   2048,
+   8192
+  ]
+ },
+ "sweepQwenCachedSlopeHigh": {
+  "value": 0.002164525346057529,
+  "ci": [
+   0.0018985138414203307,
+   0.0024190172033559413
+  ],
+  "sizes": [
+   16384,
+   32672
+  ]
+ },
+ "sweepQwenCachedNCalls": 60,
+ "sweepQwenCachedCtxMax": 32672,
+ "sweepQwenCachedCtxPNinetyFive": 32672,
+ "sweepQwenCachedRatio2048": {
+  "value": 0.6972743784462705,
+  "ci": [
+   0.6721172328488699,
+   0.7223731926039505
+  ]
+ },
+ "sweepQwenCachedRatio4096": {
+  "value": 0.5379349799803209,
+  "ci": [
+   0.5139549140561099,
+   0.5636018127394324
+  ]
+ },
+ "sweepQwenCachedRatio8192": {
+  "value": 0.3434447063248681,
+  "ci": [
+   0.3319572196758613,
+   0.3544524122994962
+  ]
+ },
+ "sweepQwenCachedRatio16384": {
+  "value": 0.2035533729005031,
+  "ci": [
+   0.19936791002821297,
+   0.2082750754473229
+  ]
+ },
+ "sweepQwenCachedRatio24576": {
+  "value": 0.141281873558172,
+  "ci": [
+   0.1375009531815207,
+   0.14551912135489814
+  ]
+ },
+ "sweepQwenCachedRatio32672": {
+  "value": 0.10182109606231991,
+  "ci": [
+   0.09813754692459822,
+   0.1054361570744946
+  ]
+ },
+ "sweepGptossUncachedLinA": {
+  "value": -4.145993296338792,
+  "ci": [
+   -8.349451862355647,
+   -0.22590450725517128
+  ]
+ },
+ "sweepGptossUncachedLinB": {
+  "value": 0.034423186970256786,
+  "ci": [
+   0.03408942939182581,
+   0.034771961743846384
+  ]
+ },
+ "sweepGptossUncachedQuadA": {
+  "value": 81.35850441855204,
+  "ci": [
+   75.62802849194401,
+   86.88589858914098
+  ]
+ },
+ "sweepGptossUncachedQuadB": {
+  "value": 0.016174539338734605,
+  "ci": [
+   0.014794339613765708,
+   0.017583073823638162
+  ]
+ },
+ "sweepGptossUncachedQuadD": {
+  "value": 5.386065967204998e-07,
+  "ci": [
+   4.913477671762849e-07,
+   5.853573661820119e-07
+  ]
+ },
+ "sweepGptossUncachedQuadSupported": true,
+ "sweepGptossUncachedSlopeLow": {
+  "value": 0.02142114890254131,
+  "ci": [
+   0.02023546122729816,
+   0.022646278754098845
+  ],
+  "sizes": [
+   2048,
+   8192
+  ]
+ },
+ "sweepGptossUncachedSlopeHigh": {
+  "value": 0.04235376175061341,
+  "ci": [
+   0.04135881711272419,
+   0.04334303825924841
+  ],
+  "sizes": [
+   16384,
+   32672
+  ]
+ },
+ "sweepGptossUncachedNCalls": 60,
+ "sweepGptossUncachedCtxMax": 32672,
+ "sweepGptossUncachedCtxPNinetyFive": 32672,
+ "sweepGptossCachedLinA": {
+  "value": 88.10500134383378,
+  "ci": [
+   85.28352149572815,
+   90.69954506736957
+  ]
+ },
+ "sweepGptossCachedLinB": {
+  "value": 0.0007438504228505073,
+  "ci": [
+   0.0006244712689788699,
+   0.0008875430101970067
+  ]
+ },
+ "sweepGptossCachedQuadA": {
+  "value": 89.43429991955246,
+  "ci": [
+   85.08383605768759,
+   93.22600027523063
+  ]
+ },
+ "sweepGptossCachedQuadB": {
+  "value": 0.0004601472030927874,
+  "ci": [
+   -0.00014702653238041308,
+   0.0010930771083103137
+  ]
+ },
+ "sweepGptossCachedQuadD": {
+  "value": 8.373465736119246e-09,
+  "ci": [
+   -8.915427107412635e-09,
+   2.5420044970744223e-08
+  ]
+ },
+ "sweepGptossCachedQuadSupported": false,
+ "sweepGptossCachedSlopeLow": {
+  "value": 0.0010129435157960876,
+  "ci": [
+   0.0001919082836345082,
+   0.0018320126779146002
+  ],
+  "sizes": [
+   2048,
+   8192
+  ]
+ },
+ "sweepGptossCachedSlopeHigh": {
+  "value": 0.0009271222692162191,
+  "ci": [
+   0.0006194951890618524,
+   0.0012313218559509816
+  ],
+  "sizes": [
+   16384,
+   32672
+  ]
+ },
+ "sweepGptossCachedNCalls": 60,
+ "sweepGptossCachedCtxMax": 32672,
+ "sweepGptossCachedCtxPNinetyFive": 32672,
+ "sweepGptossCachedRatio2048": {
+  "value": 0.7500470053632968,
+  "ci": [
+   0.7097945328644654,
+   0.792021170278262
+  ]
+ },
+ "sweepGptossCachedRatio4096": {
+  "value": 0.5968348249843723,
+  "ci": [
+   0.562842278885208,
+   0.6268799039806661
+  ]
+ },
+ "sweepGptossCachedRatio8192": {
+  "value": 0.3840125083602744,
+  "ci": [
+   0.37019151391418154,
+   0.3983549224153851
+  ]
+ },
+ "sweepGptossCachedRatio16384": {
+  "value": 0.1993465180632059,
+  "ci": [
+   0.19031182076832756,
+   0.20846264930550598
+  ]
+ },
+ "sweepGptossCachedRatio24576": {
+  "value": 0.1309035943140308,
+  "ci": [
+   0.12697995513024996,
+   0.13445607065210874
+  ]
+ },
+ "sweepGptossCachedRatio32672": {
+  "value": 0.0961239979130471,
+  "ci": [
+   0.09362974312727759,
+   0.09940140025298706
+  ]
+ },
+ "sweepProvenance": {
+  "data_tag": "frozen_sweep",
+  "export": "inputs/frozen_runs/sweep/export_sweep",
+  "goals_sha256": "4f1cb56854eac7f9e6b0d16adfa7c55745e44bb1f1cb1ddb72c22e1832c5c3b6",
+  "calls_sha256": "a6aaa70c15a7bbc6067d399ad6ad2572d3ead6f557e03e29f4d344d0e190834b",
+  "boot": 1000,
+  "seed": 0,
+  "calls_used": 240,
+  "goals_in_ledgers": 240,
+  "class_vs_mode_mismatch": 0,
+  "usage_tokens_not_equal_size": 0,
+  "energy": "board DC_INPUT of attempt 1 minus idle; one request per sweep run",
+  "cache_class": "usage.prompt_tokens_details.cached_tokens > 0",
+  "bootstrap": "stratified by size, repeats resampled",
+  "slope_ranges": {
+   "low": [
+    2048,
+    8192
+   ],
+   "high": [
+    16384,
+    32672
+   ]
+  },
+  "detail": {
+   "sweepQwenUncachedMeanBySize": {
+    "2048": 91.02658059224001,
+    "4096": 132.375328515542,
+    "8192": 230.90669771830397,
+    "16384": 488.2243885659418,
+    "24576": 843.3756951189596,
+    "32672": 1322.1962340500181
+   },
+   "sweepQwenCachedMeanBySize": {
+    "2048": 63.4705024045435,
+    "4096": 71.2093196948965,
+    "8192": 79.30368298630802,
+    "16384": 99.37972102488327,
+    "24576": 119.15369831983226,
+    "32672": 134.6274697604445
+   },
+   "sweepGptossUncachedMeanBySize": {
+    "2048": 118.89755062555678,
+    "4096": 153.790371181345,
+    "8192": 248.71355100344732,
+    "16384": 496.21108135262466,
+    "24576": 799.4089448980849,
+    "32672": 1186.241452560457
+   },
+   "sweepGptossCachedMeanBySize": {
+    "2048": 89.17875179172984,
+    "4096": 91.7874492682997,
+    "8192": 95.50911458402484,
+    "16384": 98.91795129202393,
+    "24576": 104.64550421394634,
+    "32672": 114.0262709102913
+   }
+  }
+ }
+}

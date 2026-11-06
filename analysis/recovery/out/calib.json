@@ -1,0 +1,28 @@
+{
+ "blocks": 240,
+ "att1_energy_ratio_E1b_over_E1_median": 1.0462586379500125,
+ "att1_energy_ratio_q10_q90": [
+  0.9774706148859429,
+  1.127951323452453
+ ],
+ "att1_energy_ratio_pooled": 1.0491626904449718,
+ "duration_ratio_median": 1.016681562315306,
+ "gross_power_ratio_median": 0.9958919374784099,
+ "idle_W_E1": [
+  47.76,
+  49.78
+ ],
+ "idle_W_E1b": [
+  47.0,
+  49.27
+ ],
+ "baselines_E1": [
+  "baseline_1792100195_39554",
+  "baseline_1792184033_138663"
+ ],
+ "baselines_E1b": [
+  "baseline_1792139675_83602",
+  "baseline_1792156279_104133"
+ ],
+ "within_E1_block_max_over_min_median": 1.0387761163790774
+}
